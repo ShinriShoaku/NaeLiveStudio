@@ -72,6 +72,7 @@ public class CompositeSceneVideoSource extends VideoSource {
     private VirtualDisplay virtualDisplay;
     private ImageReader imageReader;
     private HandlerThread screenCaptureThread;
+    private Bitmap reusableScreenBitmap;
     private volatile Bitmap currentScreenFrame;
     private final Object screenLock = new Object();
 
@@ -218,13 +219,8 @@ public class CompositeSceneVideoSource extends VideoSource {
             try {
                 Image image = reader.acquireLatestImage();
                 if (image != null) {
-                    Bitmap bmp = imageToBitmap(image);
-                    if (bmp != null) {
-                        synchronized (screenLock) {
-                            Bitmap old = currentScreenFrame;
-                            currentScreenFrame = bmp;
-                            if (old != null && old != bmp) old.recycle();
-                        }
+                    synchronized (screenLock) {
+                        updateScreenBitmap(image);
                     }
                     image.close();
                 }
@@ -232,23 +228,24 @@ public class CompositeSceneVideoSource extends VideoSource {
         }, handler);
     }
 
-    private Bitmap imageToBitmap(Image image) {
+    private void updateScreenBitmap(Image image) {
         try {
             Image.Plane[] planes = image.getPlanes();
             ByteBuffer buffer = planes[0].getBuffer();
             int pixelStride = planes[0].getPixelStride();
             int rowStride = planes[0].getRowStride();
             int rowPadding = rowStride - pixelStride * image.getWidth();
-
-            // FIX: Gunakan ukuran buffer asli (termasuk padding) agar copyPixelsFromBuffer tidak crash.
-            // Kita akan memotong padding-nya nanti saat menggambar menggunakan source Rect.
             int bitmapWidth = image.getWidth() + rowPadding / pixelStride;
-            Bitmap bitmap = Bitmap.createBitmap(bitmapWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
-            bitmap.copyPixelsFromBuffer(buffer);
-            return bitmap;
+
+            if (reusableScreenBitmap == null || reusableScreenBitmap.getWidth() != bitmapWidth || reusableScreenBitmap.getHeight() != image.getHeight()) {
+                if (reusableScreenBitmap != null) reusableScreenBitmap.recycle();
+                reusableScreenBitmap = Bitmap.createBitmap(bitmapWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
+            }
+            buffer.rewind();
+            reusableScreenBitmap.copyPixelsFromBuffer(buffer);
+            currentScreenFrame = reusableScreenBitmap;
         } catch (Exception e) {
-            Log.e(TAG, "imageToBitmap error", e);
-            return null;
+            Log.e(TAG, "updateScreenBitmap error", e);
         }
     }
 
@@ -272,10 +269,11 @@ public class CompositeSceneVideoSource extends VideoSource {
         }
 
         synchronized (screenLock) {
-            if (currentScreenFrame != null) {
-                currentScreenFrame.recycle();
-                currentScreenFrame = null;
+            if (reusableScreenBitmap != null) {
+                reusableScreenBitmap.recycle();
+                reusableScreenBitmap = null;
             }
+            currentScreenFrame = null;
         }
 
         drawThread = null;
@@ -318,18 +316,27 @@ public class CompositeSceneVideoSource extends VideoSource {
             }
 
             long positionUs = 0;
+            long frameIntervalUs = 33333L; // ~30fps
             while (running) {
+                long start = System.currentTimeMillis();
                 try {
+                    // CATATAN: MediaMetadataRetriever sangat lambat untuk real-time.
+                    // OPTION_CLOSEST bisa memakan waktu >100ms.
                     Bitmap frame = retriever.getFrameAtTime(positionUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
                     if (frame != null) currentVideoBgFrame = frame;
                 } catch (Exception ignored) {
                 }
-                positionUs += 180_000L;
+                positionUs += frameIntervalUs;
                 if (positionUs >= durationUs) positionUs = 0;
-                try {
-                    Thread.sleep(180);
-                } catch (InterruptedException e) {
-                    break;
+                
+                long elapsed = System.currentTimeMillis() - start;
+                long sleep = 33 - elapsed;
+                if (sleep > 0) {
+                    try {
+                        Thread.sleep(sleep);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
                 }
             }
             try {
@@ -343,8 +350,10 @@ public class CompositeSceneVideoSource extends VideoSource {
     private void startCompositeDrawLoop() {
         drawThread = new Thread(() -> {
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-            long[] lastLog = {0L};
+            long lastLog = 0L;
+            long frameTimeMs = 33; // ~30fps
             while (running && targetSurface != null && targetSurface.isValid()) {
+                long startTime = System.currentTimeMillis();
                 Canvas canvas = null;
                 try {
                     canvas = targetSurface.lockCanvas(null);
@@ -352,9 +361,6 @@ public class CompositeSceneVideoSource extends VideoSource {
                         int cW = canvas.getWidth();
                         int cH = canvas.getHeight();
 
-                        // FIX: Selalu gambar dalam koordinat designWidth x designHeight.
-                        // Jika Canvas dari SurfaceTexture punya ukuran berbeda, kita scale
-                        // secara merata (stretch) agar memenuhi seluruh buffer.
                         canvas.save();
                         canvas.scale((float) cW / designWidth, (float) cH / designHeight);
 
@@ -364,8 +370,8 @@ public class CompositeSceneVideoSource extends VideoSource {
                         canvas.restore();
 
                         long now = System.currentTimeMillis();
-                        if (now - lastLog[0] > 5000) {
-                            lastLog[0] = now;
+                        if (now - lastLog > 5000) {
+                            lastLog = now;
                             Log.d(TAG, "drawLoop: Rendered " + designWidth + "x" + designHeight +
                                     " into Canvas " + cW + "x" + cH);
                         }
@@ -375,10 +381,15 @@ public class CompositeSceneVideoSource extends VideoSource {
                         targetSurface.unlockCanvasAndPost(canvas);
                     }
                 }
-                try {
-                    Thread.sleep(33); // ~30fps
-                } catch (InterruptedException e) {
-                    break;
+                
+                long elapsed = System.currentTimeMillis() - startTime;
+                long sleep = frameTimeMs - elapsed;
+                if (sleep > 0) {
+                    try {
+                        Thread.sleep(sleep);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
                 }
             }
         }, "CompositeScene-draw");

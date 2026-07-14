@@ -116,7 +116,9 @@ public class FakeSceneVideoSource extends VideoSource {
     private void startStaticImageLoop() {
         staticDrawThread = new Thread(() -> {
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+            long frameTimeMs = 33; // ~30fps
             while (running && targetSurface != null && targetSurface.isValid()) {
+                long startTime = System.currentTimeMillis();
                 Canvas canvas = null;
                 try {
                     canvas = targetSurface.lockCanvas(null);
@@ -134,10 +136,15 @@ public class FakeSceneVideoSource extends VideoSource {
                         targetSurface.unlockCanvasAndPost(canvas);
                     }
                 }
-                try {
-                    Thread.sleep(33);
-                } catch (InterruptedException e) {
-                    break;
+                
+                long elapsed = System.currentTimeMillis() - startTime;
+                long sleep = frameTimeMs - elapsed;
+                if (sleep > 0) {
+                    try {
+                        Thread.sleep(sleep);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
                 }
             }
         }, "FakeSceneVideoSource-image");

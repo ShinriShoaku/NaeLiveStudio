@@ -16,4 +16,7 @@
     <string name="label_audio_source">Sumber Suara:</string>
     <string name="btn_test_record">🎥 TEST</string>
     <string name="layer_note">Belum ada layer. Tap Gambar/Video atau Teks di atas.</string>
+    <string name="record">🎬 RECORD</string>
+    <string name="stop">⏹ STOP</string>
+    <string name="live">🔴 LIVE</string>
 </resources>

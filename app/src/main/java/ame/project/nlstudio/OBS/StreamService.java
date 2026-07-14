@@ -645,10 +645,8 @@ public class StreamService extends Service implements ConnectChecker {
         applyEncoderType(encoderType);
 
         Log.d(TAG, "startTestRecord: prepareVideo(width=" + width + ", height=" + height
-                + ", bitrate=" + vBitrate + ", fps=" + fps + ", iFrameInterval=2) - dikembalikan ke urutan asli");
+                + ", bitrate=" + vBitrate + ", fps=" + fps + ", iFrameInterval=2)");
         boolean videoOk = rtmpStream.prepareVideo(width, height, vBitrate, fps, 2);
-        logGlInterfaceState("startTestRecord setelah prepareVideo, SEBELUM changeVideoSource");
-        // FIX: Pindah ke applyGlProperties()
 
         boolean audioOk = true;
         if (audioSourceIndex != 3) {
@@ -667,7 +665,6 @@ public class StreamService extends Service implements ConnectChecker {
         }
         savedMediaProjection = mediaProjection;
 
-        // Terapkan source video awal
         if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
             try {
                 applyCompositeScene(initialSceneJson);
@@ -678,50 +675,67 @@ public class StreamService extends Service implements ConnectChecker {
             rtmpStream.changeVideoSource(new ScreenSource(this, mediaProjection));
         }
 
-        // FIX: Panggil properti GL SETELAH changeVideoSource
         applyGlProperties();
-
         applyAudioSource(mediaProjection, audioSourceIndex, 1.0f, 1.0f, -1);
 
         String encoderLabel = (encoderType == 1) ? "SOFTWARE" : "HARDWARE";
-        int vBitrateKbps = vBitrate / 1024;
-        String outputPath = buildTestRecordPath(encoderLabel, width, height, fps, vBitrateKbps);
+        // 1. Simpan sementara di folder internal agar tidak kena blokir permission
+        File tempFolder = new File(getExternalFilesDir(null), "temp_records");
+        if (!tempFolder.exists()) tempFolder.mkdirs();
+        File tempFile = new File(tempFolder, "temp_record.mp4");
+        String outputPath = tempFile.getAbsolutePath();
 
         try {
-            rtmpStream.startRecord(outputPath, status -> {
-                // status berubah-ubah sesuai proses record (opsional buat di-log)
-            });
+            rtmpStream.startRecord(outputPath, status -> {});
             isTestRecording = true;
-            Toast.makeText(this,
-                    "Test record dimulai: " + encoderLabel + " | " + width + "x" + height
-                            + " @" + fps + "fps | " + vBitrateKbps + "kbps | " + (durationMs / 1000) + "s",
-                    Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Merekam... (30 detik)", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
-            Toast.makeText(this, "Gagal mulai test record: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Gagal mulai rekam: " + e.getMessage(), Toast.LENGTH_LONG).show();
             stopEverything();
             return;
         }
 
         handler.postDelayed(() -> {
             if (isTestRecording) {
-                finishTestRecord(outputPath);
+                finishTestRecord(outputPath, encoderLabel, width, height);
             }
         }, durationMs);
     }
 
-    private void finishTestRecord(String outputPath) {
-        Toast.makeText(this, "Test record selesai. Tersimpan di: " + outputPath, Toast.LENGTH_LONG).show();
-        stopEverything();
-    }
-
-    private String buildTestRecordPath(String encoderLabel, int width, int height, int fps, int vBitrateKbps) {
-        File folder = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "V2Case");
-        if (!folder.exists()) {
-            folder.mkdirs();
+    private void finishTestRecord(String tempPath, String encoderLabel, int w, int h) {
+        if (rtmpStream != null && rtmpStream.isRecording()) {
+            rtmpStream.stopRecord();
         }
-        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
-        String fileName = "test_" + encoderLabel + "_" + width + "x" + height + "_" + fps + "fps_" + vBitrateKbps + "kbps_" + timestamp + ".mp4";
-        return new File(folder, fileName).getAbsolutePath();
+        isTestRecording = false;
+
+        // 2. Export file dari folder internal ke Gallery (MediaStore)
+        try {
+            android.content.ContentValues values = new android.content.ContentValues();
+            String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(new java.util.Date());
+            String fileName = "NLStudio_" + encoderLabel + "_" + w + "x" + h + "_" + timestamp + ".mp4";
+
+            values.put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, fileName);
+            values.put(android.provider.MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+            values.put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, android.os.Environment.DIRECTORY_MOVIES + "/NLStudio");
+
+            android.net.Uri uri = getContentResolver().insert(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
+            if (uri != null) {
+                try (java.io.InputStream is = new java.io.FileInputStream(tempPath);
+                     java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
+                    byte[] buffer = new byte[1024 * 1024];
+                    int read;
+                    while ((read = is.read(buffer)) != -1) {
+                        os.write(buffer, 0, read);
+                    }
+                }
+                Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal export ke gallery", e);
+            Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
+        }
+
+        stopEverything();
     }
 
     // ==================== HELPER BERSAMA ====================
@@ -736,7 +750,19 @@ public class StreamService extends Service implements ConnectChecker {
 
     private MediaProjection getMediaProjection(int resultCode, Intent data) {
         MediaProjectionManager manager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-        return manager.getMediaProjection(resultCode, data);
+        MediaProjection mediaProjection = manager.getMediaProjection(resultCode, data);
+        if (mediaProjection != null) {
+            // FIX: Di Android 14+ (API 34), MediaProjection WAJIB punya callback yang terdaftar
+            // SEBELUM dipakai buat createVirtualDisplay atau audio capture. Kalau tidak,
+            // muncul "IllegalStateException: MediaProjection: must register a callback before start".
+            mediaProjection.registerCallback(new MediaProjection.Callback() {
+                @Override
+                public void onStop() {
+                    Log.d(TAG, "MediaProjection stopped");
+                }
+            }, handler);
+        }
+        return mediaProjection;
     }
 
     private void applyAudioSource(MediaProjection mediaProjection, int audioSourceIndex,

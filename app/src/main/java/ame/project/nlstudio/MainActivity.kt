@@ -699,46 +699,31 @@ class MainActivity : AppCompatActivity() {
         refreshCanvasLayers()
     }
 
-    private fun applyGameCenteredPreset() {
+    private fun applyPortraitPreset(position: String) { // "center", "top", "bottom"
         val metrics = resources.displayMetrics
-        // Selalu gunakan Portrait (Lebar < Tinggi) untuk preset "Game di Tengah"
         val rootW = minOf(metrics.widthPixels, metrics.heightPixels)
         val rootH = maxOf(metrics.widthPixels, metrics.heightPixels)
 
-        Log.d(TAG, "=== applyGameCenteredPreset ===")
-        Log.d(TAG, "  displayMetrics=${metrics.widthPixels}x${metrics.heightPixels}")
-        Log.d(TAG, "  FORCED Portrait rootW=$rootW, rootH=$rootH")
-        Log.d(TAG, "  orientation=${resources.configuration.orientation}")
-
-        // Kunci resolusi ini sebagai satu-satunya sumber kebenaran sampai user save atau ganti manual.
-        // Ini yang bikin canvas TIDAK bisa "kebaca landscape" lagi pas save, walau displayMetrics
-        // sempat berubah di antara apply preset dan tekan Simpan.
+        Log.d(TAG, "=== applyPortraitPreset position=$position ===")
         editingForcedRootResolution = rootW to rootH
-
-        // Set root resolution di UI (ikut resolusi HP - Native Portrait)
         rootLayoutUserTouched = false
         spinnerRootLayout.setSelection(0)
 
-        // Ubah backgroundType ke COLOR jika saat ini adalah SCREEN, agar terpicu mode composite
         if (editingBackgroundType == BackgroundType.SCREEN) {
             editingBackgroundType = BackgroundType.COLOR
             editingBackgroundUri = null
             refreshCanvasBackground()
         }
 
-        // Clear layers and add a SCREEN layer in the middle
         editingLayers.clear()
-
-        // Game (Landscape 16:9): Lebar = rootW, Tinggi = rootW * 9/16
         val gameHeight = rootW * 9f / 16f
-        val topPadding = (rootH - gameHeight) / 2f
-
-        // Rasio untuk disimpan ke SceneLayer
         val hRatio = gameHeight / rootH
-        val yRatio = topPadding / rootH
-
-        Log.d(TAG, "  gameHeight=$gameHeight, topPadding=$topPadding")
-        Log.d(TAG, "  hRatio=$hRatio, yRatio=$yRatio")
+        
+        val yRatio = when(position) {
+            "top" -> 0f
+            "bottom" -> (rootH - gameHeight) / rootH
+            else -> ((rootH - gameHeight) / 2f) / rootH // center
+        }
 
         val gameLayer = SceneLayer(
             id = UUID.randomUUID().toString(),
@@ -751,18 +736,67 @@ class MainActivity : AppCompatActivity() {
             zIndex = 0
         )
         editingLayers.add(gameLayer)
-
-        Log.d(TAG, "  Created SCREEN layer: x=${gameLayer.x} y=${gameLayer.y} w=${gameLayer.w} h=${gameLayer.h}")
-
-        etNewSceneName.setText("Preset Game Tengah")
+        
+        val label = when(position) {
+            "top" -> "Game Atas"
+            "bottom" -> "Game Bawah"
+            else -> "Game Tengah"
+        }
+        etNewSceneName.setText("Preset $label")
+        dialogSceneManagerView.findViewById<Button>(R.id.btnApplyRootPreset)?.text = "Terapkan: $label"
+        
         refreshCanvasAspectRatio()
         refreshCanvasLayers()
-        Toast.makeText(this, "Preset Game di Tengah diterapkan (Mode Portrait)", Toast.LENGTH_SHORT).show()
+        
+        // Simpan otomatis ke daftar scene dan terapkan ke main activity
+        saveCurrentEditingScene()
+    }
+
+    private fun applyLandscapeFullPreset() {
+        val metrics = resources.displayMetrics
+        val rootW = maxOf(metrics.widthPixels, metrics.heightPixels)
+        val rootH = minOf(metrics.widthPixels, metrics.heightPixels)
+
+        Log.d(TAG, "=== applyLandscapeFullPreset ===")
+        editingForcedRootResolution = rootW to rootH
+        rootLayoutUserTouched = false
+        spinnerRootLayout.setSelection(2) // 1920x1080 (Landscape)
+
+        if (editingBackgroundType == BackgroundType.SCREEN) {
+            editingBackgroundType = BackgroundType.COLOR
+            editingBackgroundUri = null
+            refreshCanvasBackground()
+        }
+
+        editingLayers.clear()
+        val gameLayer = SceneLayer(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.SCREEN,
+            uri = "screen://main",
+            x = 0f,
+            y = 0f,
+            w = 1.0f,
+            h = 1.0f,
+            zIndex = 0
+        )
+        editingLayers.add(gameLayer)
+
+        etNewSceneName.setText("Preset Landscape Full")
+        dialogSceneManagerView.findViewById<Button>(R.id.btnApplyRootPreset)?.text = "Terapkan: Landscape Full"
+
+        refreshCanvasAspectRatio()
+        refreshCanvasLayers()
+        
+        // Simpan otomatis ke daftar scene dan terapkan ke main activity
+        saveCurrentEditingScene()
+    }
+
+    private fun applyGameCenteredPreset() {
+        applyPortraitPreset("center")
     }
 
     private fun refreshCanvasBackground() {
         val isEmptyHint = findViewById<TextView>(R.id.tvEmptyHint)
-        val dialogCanvas = dialogSceneManagerView.findViewById<SceneCanvasView>(R.id.sceneCanvasView)
 
         updateVideoControlsVisibility()
 
@@ -770,7 +804,6 @@ class MainActivity : AppCompatActivity() {
             isEmptyHint?.text = "PREVIEW LAYAR HP AKTIF\n(Akan muncul saat Live/Record)"
             isEmptyHint?.visibility = View.VISIBLE
             sceneCanvasView.setBackgroundBitmap(null)
-            dialogCanvas?.setBackgroundBitmap(null)
             return
         }
 
@@ -779,7 +812,6 @@ class MainActivity : AppCompatActivity() {
             val uri = Uri.parse(editingBackgroundUri)
             val loop = cbLoopVideo?.isChecked ?: true
             sceneCanvasView.setBackgroundVideo(uri, loop = loop, autoPlay = true)
-            dialogCanvas?.setBackgroundVideo(uri, loop = loop, autoPlay = true)
             isEmptyHint?.visibility = View.GONE
             btnPlayVideo?.setImageResource(android.R.drawable.ic_media_pause)
             return
@@ -798,7 +830,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         sceneCanvasView.setBackgroundBitmap(bmp)
-        dialogCanvas?.setBackgroundBitmap(bmp)
     }
 
     private fun refreshCanvasLayers() {
@@ -811,10 +842,6 @@ class MainActivity : AppCompatActivity() {
 
         sceneCanvasView.setLayers(editingLayers) { layer -> sceneRepository.loadLayerPreviewBitmap(layer) }
         sceneCanvasView.setSelectedLayer(selectedLayerId)
-
-        val dialogCanvas = dialogSceneManagerView.findViewById<SceneCanvasView>(R.id.sceneCanvasView)
-        dialogCanvas?.setLayers(editingLayers) { layer -> sceneRepository.loadLayerPreviewBitmap(layer) }
-        dialogCanvas?.setSelectedLayer(selectedLayerId)
 
         editorLayerAdapter?.submitList(editingLayers, selectedLayerId)
         tvLayerCount?.text = "${editingLayers.size} layer"
@@ -833,8 +860,6 @@ class MainActivity : AppCompatActivity() {
         val ratio = rootW.toFloat() / rootH
         Log.d(TAG, "refreshCanvasAspectRatio: root=${rootW}x${rootH} ratio=$ratio")
         sceneCanvasView.setTargetAspectRatio(ratio)
-        val dialogCanvas = dialogSceneManagerView.findViewById<SceneCanvasView>(R.id.sceneCanvasView)
-        dialogCanvas?.setTargetAspectRatio(ratio)
     }
 
     private fun confirmDeleteScene(scene: Scene) {
@@ -906,22 +931,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSceneManagerDialog() {
         (dialogSceneManagerView.parent as? android.view.ViewGroup)?.removeView(dialogSceneManagerView)
-
-        // Ensure dialog preview matches main canvas
-        dialogSceneManagerView.findViewById<SceneCanvasView>(R.id.sceneCanvasView)?.let { dialogCanvas ->
-            if (editingBackgroundType == BackgroundType.VIDEO && editingBackgroundUri != null) {
-                dialogCanvas.setBackgroundVideo(Uri.parse(editingBackgroundUri), loop = cbLoopVideo?.isChecked ?: true, autoPlay = true)
-            } else {
-                dialogCanvas.setBackgroundBitmap(
-                    when (editingBackgroundType) {
-                        BackgroundType.IMAGE -> editingBackgroundUri?.let { sceneRepository.loadPreviewBitmap(Uri.parse(it)) }
-                        else -> null
-                    }
-                )
-            }
-            dialogCanvas.setLayers(editingLayers) { layer -> sceneRepository.loadLayerPreviewBitmap(layer) }
-            dialogCanvas.setSelectedLayer(selectedLayerId)
-        }
 
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Scene Manager")
@@ -1072,12 +1081,18 @@ class MainActivity : AppCompatActivity() {
             applyGameCenteredPreset()
         }
 
-        val dialogCanvas = dialogSceneManagerView.findViewById<SceneCanvasView>(R.id.sceneCanvasView)
-        dialogCanvas?.onLayerSelected = { layer ->
-            selectLayer(layer.id)
-            val btnDel = dialogSceneManagerView.findViewById<Button>(R.id.btnDeleteSelectedLayer)
-            btnDel?.isEnabled = true
-            btnDel?.alpha = 1.0f
+        // New Presets Click Listeners
+        dialogSceneManagerView.findViewById<View>(R.id.presetPortraitCenter)?.setOnClickListener {
+            applyPortraitPreset("center")
+        }
+        dialogSceneManagerView.findViewById<View>(R.id.presetPortraitTop)?.setOnClickListener {
+            applyPortraitPreset("top")
+        }
+        dialogSceneManagerView.findViewById<View>(R.id.presetPortraitBottom)?.setOnClickListener {
+            applyPortraitPreset("bottom")
+        }
+        dialogSceneManagerView.findViewById<View>(R.id.presetLandscapeFull)?.setOnClickListener {
+            applyLandscapeFullPreset()
         }
     }
 

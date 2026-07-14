@@ -40,11 +40,10 @@
 
         <ImageButton
             android:id="@+id/btnSettings"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:src="@android:drawable/ic_menu_preferences"
-            app:tint="#FFFFFF"
+            android:layout_width="26dp"
+            android:layout_height="26dp"
+            android:layout_marginEnd="5dp"
+            android:background="@drawable/settings"
             android:contentDescription="Settings" />
 
         <ImageButton
@@ -157,7 +156,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="🔴 LIVE" />
+                android:text="@string/live" />
 
             <Button
                 android:id="@+id/btnTestRecord"
@@ -166,7 +165,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
-                android:text="🎬 TEST" />
+                android:text="@string/record" />
 
             <Button
                 android:id="@+id/btnStop"
@@ -175,7 +174,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
-                android:text="⏹ STOP" />
+                android:text="@string/stop" />
         </LinearLayout>
 
         <TextView
