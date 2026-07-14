@@ -125,11 +125,11 @@ public class StreamService extends Service implements ConnectChecker {
 
             for (java.lang.reflect.Method m : glInterface.getClass().getMethods()) {
                 String lower = m.getName().toLowerCase();
-                boolean match = false;
+                boolean mMatch = false;
                 for (String k : keywords) {
-                    if (lower.contains(k)) { match = true; break; }
+                    if (lower.contains(k)) { mMatch = true; break; }
                 }
-                if (match && m.getParameterCount() == 0) {
+                if (mMatch && m.getParameterCount() == 0) {
                     try {
                         m.setAccessible(true);
                         Object result = m.invoke(glInterface);
@@ -167,6 +167,8 @@ public class StreamService extends Service implements ConnectChecker {
     public static final String ACTION_TEST_RECORD = "com.example.tiktoklive.TEST_RECORD";
     public static final String ACTION_SWITCH_SCENE = "com.example.tiktoklive.SWITCH_SCENE";
     public static final String ACTION_UPDATE_AUDIO_GAIN = "com.example.tiktoklive.UPDATE_AUDIO_GAIN";
+    public static final String ACTION_STATUS_BROADCAST = "com.example.tiktoklive.STATUS_BROADCAST";
+    public static final String EXTRA_STATUS_MSG = "statusMsg";
 
     public static final String EXTRA_RESULT_CODE = "resultCode";
     public static final String EXTRA_DATA = "data";
@@ -192,6 +194,8 @@ public class StreamService extends Service implements ConnectChecker {
     // audioSourceIndex == ini artinya pakai AudioMixSource (volume mic & sistem terpisah)
     public static final int AUDIO_MODE_MANUAL_MIXER = 4;
 
+    public static volatile boolean isServiceRunning = false;
+
     private static final String CHANNEL_ID = "tiktok_live_channel";
     private static final int NOTIFICATION_ID = 1;
     private static final long DEFAULT_TEST_DURATION_MS = 30000L;
@@ -213,6 +217,7 @@ public class StreamService extends Service implements ConnectChecker {
     @Override
     public void onCreate() {
         super.onCreate();
+        isServiceRunning = true;
         rtmpStream = new RtmpStream(this, this);
     }
 
@@ -272,6 +277,13 @@ public class StreamService extends Service implements ConnectChecker {
                         width = rootW;
                         height = rootH;
                     }
+                    
+                    // Trigger prefetch untuk video background jika ada
+                    String bgUri = o.optString("backgroundUri", null);
+                    if ("VIDEO".equals(o.optString("backgroundType")) && bgUri != null) {
+                        VideoCacheManager.getInstance().prefetch(this, Uri.parse(bgUri), 
+                                width, height, fps, 250L * 1024 * 1024, null);
+                    }
                 } catch (Exception e) {
                     Log.e(TAG, "onStartCommand: gagal parse sceneJson buat intip rootWidth/Height", e);
                 }
@@ -314,7 +326,7 @@ public class StreamService extends Service implements ConnectChecker {
                         audioSourceIndex, encoderType, micGain, systemGain, gameUid, initialSceneType, initialSceneJson);
             } else {
                 long durationMs = intent.getLongExtra(EXTRA_TEST_DURATION_MS, DEFAULT_TEST_DURATION_MS);
-                startTestRecord(resultCode, data, width, height, fps, vBitrate, aBitrate, audioSourceIndex, encoderType, durationMs, initialSceneType, initialSceneJson);
+                startTestRecord(resultCode, data, width, height, fps, vBitrate, aBitrate, audioSourceIndex, encoderType, durationMs, micGain, systemGain, gameUid, initialSceneType, initialSceneJson);
             }
         } else if (ACTION_STOP.equals(action)) {
             stopEverything();
@@ -385,6 +397,8 @@ public class StreamService extends Service implements ConnectChecker {
         }
         savedMediaProjection = mediaProjection;
 
+        applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
+
         // Terapkan source video awal berdasarkan scene yang dipilih
         if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
             try {
@@ -398,8 +412,6 @@ public class StreamService extends Service implements ConnectChecker {
 
         // FIX: Panggil properti GL SETELAH changeVideoSource agar tidak ter-reset
         applyGlProperties();
-
-        applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
 
         rtmpStream.startStream(rtmpUrl);
     }
@@ -447,36 +459,38 @@ public class StreamService extends Service implements ConnectChecker {
      */
     private void switchScene(String scene, Uri uri, String sceneJson) {
         Log.d(TAG, "switchScene: scene=" + scene + " uri=" + uri
-                + " sceneJson=" + sceneJson + " savedWidth/Height(dari prepareVideo)="
+                + " sceneJson=" + sceneJson + " savedWidth/Height="
                 + savedWidth + "x" + savedHeight);
         if (scene == null || savedMediaProjection == null) return;
 
         try {
             if (SCENE_SCREEN.equals(scene)) {
                 rtmpStream.changeVideoSource(new ScreenSource(this, savedMediaProjection));
+                updateInternalAudioMuteState(true);
 
             } else if (SCENE_COMPOSITE.equals(scene) && sceneJson != null) {
                 applyCompositeScene(sceneJson);
 
             } else if (SCENE_IMAGE.equals(scene) && uri != null) {
-                // jalur lama (kompatibilitas), scene manager baru pakai SCENE_COMPOSITE
                 Bitmap bitmap = loadBitmapFromUri(uri, savedWidth, savedHeight);
                 if (bitmap != null) {
                     FakeSceneVideoSource source = new FakeSceneVideoSource(this, bitmap);
                     source.setResolution(savedWidth, savedHeight);
                     rtmpStream.changeVideoSource(source);
                 }
+                updateInternalAudioMuteState(false);
 
             } else if (SCENE_VIDEO.equals(scene) && uri != null) {
                 FakeSceneVideoSource source = new FakeSceneVideoSource(this, uri);
                 source.setResolution(savedWidth, savedHeight);
                 rtmpStream.changeVideoSource(source);
+                updateInternalAudioMuteState(false);
             }
 
-            // Re-apply GL properties setiap ganti scene
             applyGlProperties();
 
         } catch (Exception e) {
+            Log.e(TAG, "Gagal ganti scene", e);
             Toast.makeText(this, "Gagal ganti scene: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
     }
@@ -489,6 +503,12 @@ public class StreamService extends Service implements ConnectChecker {
         JSONObject o = new JSONObject(sceneJson);
         String bgTypeStr = o.optString("backgroundType", "COLOR");
         String bgUriStr = o.isNull("backgroundUri") ? null : o.optString("backgroundUri", null);
+
+        // Prefetch video background jika scene baru ini memilikinya
+        if ("VIDEO".equals(bgTypeStr) && bgUriStr != null) {
+            VideoCacheManager.getInstance().prefetch(this, Uri.parse(bgUriStr),
+                    savedWidth, savedHeight, savedFps, 250L * 1024 * 1024, null);
+        }
 
         // FIX: JANGAN pakai rootWidth/rootHeight dari JSON scene di sini. Itu cuma resolusi device
         // pas scene itu DIBUAT/DISIMPAN, bisa beda dari resolusi yang AKTUAL dipakai encoder di sesi
@@ -553,6 +573,16 @@ public class StreamService extends Service implements ConnectChecker {
         // urutin sesuai zIndex biar layer "belakang" digambar duluan, layer "depan" nutup di atasnya
         Collections.sort(layers, (a, b) -> Integer.compare(a.zIndex, b.zIndex));
 
+        // Auto-mute internal audio jika tidak ada layer SCREEN
+        boolean hasScreenLayer = false;
+        for (CompositeSceneVideoSource.Layer layer : layers) {
+            if (layer.type == ame.project.nlstudio.scene.LayerType.SCREEN) {
+                hasScreenLayer = true;
+                break;
+            }
+        }
+        updateInternalAudioMuteState(hasScreenLayer);
+
         CompositeSceneVideoSource source = new CompositeSceneVideoSource(
                 this, bgType, backgroundImage, backgroundVideoUri, layers, rootW, rootH);
         source.setMediaProjection(savedMediaProjection);
@@ -610,8 +640,8 @@ public class StreamService extends Service implements ConnectChecker {
         }
     }
 
-    private Bitmap renderTextToBitmap(String text) {
-        if (text == null) text = "";
+    private Bitmap renderTextToBitmap(String rawText) {
+        String textToRender = rawText == null ? "" : rawText;
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         paint.setColor(Color.WHITE);
         paint.setTextSize(64f);
@@ -619,7 +649,7 @@ public class StreamService extends Service implements ConnectChecker {
         paint.setTextAlign(Paint.Align.LEFT);
 
         Rect bounds = new Rect();
-        paint.getTextBounds(text, 0, text.length(), bounds);
+        paint.getTextBounds(textToRender, 0, textToRender.length(), bounds);
 
         int width = Math.max(bounds.width() + 40, 100);
         int height = Math.max(bounds.height() + 40, 100);
@@ -630,13 +660,14 @@ public class StreamService extends Service implements ConnectChecker {
         bgPaint.setColor(Color.parseColor("#80000000"));
         canvas.drawRect(0, 0, width, height, bgPaint);
 
-        canvas.drawText(text, 20f, height / 2f + bounds.height() / 2f - 5f, paint);
+        canvas.drawText(textToRender, 20f, height / 2f + bounds.height() / 2f - 5f, paint);
         return bitmap;
     }
 
     // ==================== TEST RECORD (LOKAL, TANPA LIVE) ====================
 
     private void startTestRecord(int resultCode, Intent data, int width, int height, int fps, int vBitrate, int aBitrate, int audioSourceIndex, int encoderType, long durationMs,
+                                 float micGain, float systemGain, int gameUid,
                                  String initialSceneType, String initialSceneJson) {
         if (rtmpStream.isStreaming() || isTestRecording || data == null) {
             return;
@@ -665,6 +696,8 @@ public class StreamService extends Service implements ConnectChecker {
         }
         savedMediaProjection = mediaProjection;
 
+        applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
+
         if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
             try {
                 applyCompositeScene(initialSceneJson);
@@ -676,7 +709,6 @@ public class StreamService extends Service implements ConnectChecker {
         }
 
         applyGlProperties();
-        applyAudioSource(mediaProjection, audioSourceIndex, 1.0f, 1.0f, -1);
 
         String encoderLabel = (encoderType == 1) ? "SOFTWARE" : "HARDWARE";
         // 1. Simpan sementara di folder internal agar tidak kena blokir permission
@@ -720,23 +752,23 @@ public class StreamService extends Service implements ConnectChecker {
 
             android.net.Uri uri = getContentResolver().insert(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
             if (uri != null) {
-                try (java.io.InputStream is = new java.io.FileInputStream(tempPath);
-                     java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
-                    byte[] buffer = new byte[1024 * 1024];
-                    int read;
-                    while ((read = is.read(buffer)) != -1) {
-                        os.write(buffer, 0, read);
-                    }
+            try (java.io.InputStream is = new java.io.FileInputStream(tempPath);
+                 java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
+                byte[] buffer = new byte[1024 * 1024];
+                int read;
+                while ((read = is.read(buffer)) != -1) {
+                    os.write(buffer, 0, read);
                 }
-                Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show();
             }
-        } catch (Exception e) {
-            Log.e(TAG, "Gagal export ke gallery", e);
-            Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
+            stopEverything("Rekaman Selesai & Tersimpan ke Gallery");
+            Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show();
         }
-
-        stopEverything();
+    } catch (Exception e) {
+        Log.e(TAG, "Gagal export ke gallery", e);
+        stopEverything("Rekaman Selesai, Gagal Simpan ke Gallery");
+        Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
     }
+}
 
     // ==================== HELPER BERSAMA ====================
 
@@ -765,19 +797,33 @@ public class StreamService extends Service implements ConnectChecker {
         return mediaProjection;
     }
 
+    private void updateInternalAudioMuteState(boolean enabled) {
+        if (audioMixSource != null) {
+            Log.d(TAG, "updateInternalAudioMuteState: " + enabled);
+            audioMixSource.setInternalEnabled(enabled);
+        }
+    }
+
     private void applyAudioSource(MediaProjection mediaProjection, int audioSourceIndex,
                                   float micGain, float systemGain, int gameUid) {
         switch (audioSourceIndex) {
-            case 0: // Internal + Mic (bawaan library)
+            case 0: // Internal + Mic
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    rtmpStream.changeAudioSource(new MixAudioSource(mediaProjection, null, MediaRecorder.AudioSource.MIC));
+                    audioMixSource = new AudioMixSource(mediaProjection, -1);
+                    audioMixSource.setMicGain(micGain);
+                    audioMixSource.setInternalGain(systemGain);
+                    rtmpStream.changeAudioSource(audioMixSource);
                 } else {
                     rtmpStream.changeAudioSource(new MicrophoneSource());
                 }
                 break;
             case 1: // Internal Only
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    rtmpStream.changeAudioSource(new MixAudioSource(mediaProjection, null, -1));
+                    audioMixSource = new AudioMixSource(mediaProjection, -1);
+                    audioMixSource.setMicEnabled(false);
+                    audioMixSource.setMicGain(0f);
+                    audioMixSource.setInternalGain(systemGain);
+                    rtmpStream.changeAudioSource(audioMixSource);
                 } else {
                     rtmpStream.changeAudioSource(new MicrophoneSource());
                 }
@@ -801,7 +847,17 @@ public class StreamService extends Service implements ConnectChecker {
         }
     }
 
+    private void sendStatusBroadcast(String msg) {
+        Intent intent = new Intent(ACTION_STATUS_BROADCAST);
+        intent.putExtra(EXTRA_STATUS_MSG, msg);
+        sendBroadcast(intent);
+    }
+
     private void stopEverything() {
+        stopEverything(null);
+    }
+
+    private void stopEverything(String finalMsg) {
         if (isStopping) return;
         isStopping = true;
 
@@ -830,6 +886,9 @@ public class StreamService extends Service implements ConnectChecker {
             }
             savedMediaProjection = null;
         }
+        
+        sendStatusBroadcast(finalMsg != null ? finalMsg : "Status: idle");
+
         stopForeground(true);
         stopSelf();
     }
@@ -837,6 +896,7 @@ public class StreamService extends Service implements ConnectChecker {
     @Override
     public void onDestroy() {
         stopEverything();
+        isServiceRunning = false;
         super.onDestroy();
     }
 
@@ -865,10 +925,12 @@ public class StreamService extends Service implements ConnectChecker {
 
     @Override
     public void onConnectionSuccess() {
+        sendStatusBroadcast("Live Streaming Aktif");
     }
 
     @Override
     public void onConnectionFailed(String reason) {
+        sendStatusBroadcast("Koneksi Gagal: " + reason);
         stopEverything();
     }
 

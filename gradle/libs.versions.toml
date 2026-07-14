@@ -9,6 +9,10 @@ activityKtx = "1.13.0"
 constraintlayout = "2.2.1"
 library = "2.7.5"
 common = "2.7.5"
+firebaseCrashlytics = "20.1.0"
+googleGmsGoogleServices = "4.5.0"
+googleFirebaseCrashlytics = "3.0.7"
+firebaseAnalytics = "23.2.0"
 
 [libraries]
 junit = { group = "junit", name = "junit", version.ref = "junit" }
@@ -20,7 +24,11 @@ activity-ktx = { group = "androidx.activity", name = "activity-ktx", version.ref
 constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
 library = { module = "com.github.pedroSG94.RootEncoder:library", version.ref = "library" }
 common = { module = "com.github.pedroSG94.RootEncoder:common", version.ref = "common" }
+firebase-crashlytics = { group = "com.google.firebase", name = "firebase-crashlytics", version.ref = "firebaseCrashlytics" }
+firebase-analytics = { group = "com.google.firebase", name = "firebase-analytics", version.ref = "firebaseAnalytics" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
+google-gms-google-services = { id = "com.google.gms.google-services", version.ref = "googleGmsGoogleServices" }
+google-firebase-crashlytics = { id = "com.google.firebase.crashlytics", version.ref = "googleFirebaseCrashlytics" }
 

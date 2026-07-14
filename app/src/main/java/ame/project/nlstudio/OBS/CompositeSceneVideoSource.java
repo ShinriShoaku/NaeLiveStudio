@@ -17,6 +17,7 @@ import android.media.projection.MediaProjection;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Surface;
@@ -40,7 +41,15 @@ public class CompositeSceneVideoSource extends VideoSource {
 
     private static final String TAG = "RES-COMP";
 
+    // Budget memori cache. ~250MB cukup buat klip pendek-menengah; disesuaikan lagi kalau perlu.
+    private static final long CACHE_MEMORY_BUDGET_BYTES = 250L * 1024 * 1024;
+    // Batas durasi cache dalam DETIK (dihitung terhadap fps asli dari encoder). Video lebih
+    // panjang dari ini otomatis fallback ke live-streaming, bukan dipotong/di-cache sebagian.
+    private static final int CACHE_MAX_DURATION_SECONDS = 20;
+
     public enum BackgroundType { COLOR, IMAGE, VIDEO }
+
+    private enum VideoPlaybackState { LOADING_CACHE, CACHED, LIVE_STREAM }
 
     public static class Layer {
         public final Bitmap bitmap;
@@ -78,9 +87,13 @@ public class CompositeSceneVideoSource extends VideoSource {
     private Surface targetSurface;
     private Thread drawThread;
     private VideoTextureDecoder videoBgDecoder;
+    private VideoTextureDecoder prefetchDecoder;
     private volatile boolean running = false;
     private volatile Bitmap currentVideoBgFrame;
     private final Object videoBgLock = new Object();
+
+    private volatile VideoPlaybackState videoPlaybackState = VideoPlaybackState.LIVE_STREAM;
+    private final CopyOnWriteArrayList<Bitmap> cachedFrames = new CopyOnWriteArrayList<>();
 
     private int designWidth = 1080;
     private int designHeight = 1920;
@@ -96,8 +109,6 @@ public class CompositeSceneVideoSource extends VideoSource {
     // di-scale kecil & di-tengah-in (letterbox) oleh GL renderer punya library.
     private int encoderWidth = 0;
     private int encoderHeight = 0;
-
-    private long lastLayerLogMs = 0L;
 
     public CompositeSceneVideoSource(Context context, BackgroundType backgroundType,
                                      Bitmap backgroundImage, Uri backgroundVideoUri,
@@ -216,9 +227,12 @@ public class CompositeSceneVideoSource extends VideoSource {
                 + " -> capW/H=" + capW + "x" + capH);
 
         imageReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+        // FIX: Gunakan Main Looper untuk internal callback MediaProjection agar tidak crash
+        // "sending message to a Handler on a dead thread" saat scene diganti/berhenti.
+        // ImageReader tetap pakai background handler agar tidak membebani UI.
         virtualDisplay = mediaProjection.createVirtualDisplay("CompositeScreen",
                 capW, capH, metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader.getSurface(), null, handler);
+                imageReader.getSurface(), null, new Handler(Looper.getMainLooper()));
 
         imageReader.setOnImageAvailableListener(reader -> {
             try {
@@ -263,6 +277,12 @@ public class CompositeSceneVideoSource extends VideoSource {
             videoBgDecoder.stop();
             videoBgDecoder = null;
         }
+        if (prefetchDecoder != null) {
+            prefetchDecoder.stop();
+            prefetchDecoder = null;
+        }
+        recycleCachedFrames();
+
         synchronized (videoBgLock) {
             currentVideoBgFrame = null;
         }
@@ -272,6 +292,7 @@ public class CompositeSceneVideoSource extends VideoSource {
             virtualDisplay = null;
         }
         if (imageReader != null) {
+            imageReader.setOnImageAvailableListener(null, null);
             imageReader.close();
             imageReader = null;
         }
@@ -308,24 +329,87 @@ public class CompositeSceneVideoSource extends VideoSource {
     private void joinQuietly(Thread t) {
         if (t == null) return;
         try {
-            t.join(300);
+            // FIX ANR: Gunakan timeout yang lebih kecil (200ms) untuk join thread di UI thread.
+            // Jika lewat batas, interrupt saja agar tidak memblokir UI (ANR).
+            t.join(200);
+            if (t.isAlive()) {
+                t.interrupt();
+            }
         } catch (InterruptedException ignored) {
         }
     }
 
     /**
-     * FIX SMOOTHNESS: sebelumnya di sini pakai MediaMetadataRetriever.getFrameAtTime() yang
-     * dipanggil berulang tiap ~33ms - itu didesain buat ambil thumbnail sesekali, BUKAN
-     * playback real-time (tiap panggilan seek + redecode dari keyframe terdekat, bisa >100ms).
-     * Itu penyebab utama background video patah-patah.
-     *
-     * Sekarang pakai VideoTextureDecoder: video didecode terus-menerus lewat MediaPlayer ->
-     * SurfaceTexture -> GL, dan frame baru cuma diproses saat memang tersedia (event-driven,
-     * bukan polling). Hasilnya ditulis ke currentVideoBgFrame dengan lock singkat + double
-     * buffer di dalam VideoTextureDecoder supaya draw thread di bawah tidak pernah baca frame
-     * yang sedang setengah ditulis (anti-tearing).
+     * FIX SMOOTHNESS & RESOURCE: Sebelumnya background video didecode terus-menerus.
+     * Sekarang kita coba cache ke RAM (RGB_565) kalau durasinya pendek (<20s) biar CPU/GPU
+     * lebih santai. Kalau kepanjangan atau RAM gak cukup, otomatis balik ke live-streaming.
      */
     private void startVideoBackgroundLoop() {
+        if (backgroundVideoUri == null) return;
+
+        // Cek apakah sudah ada di Global Cache
+        List<Bitmap> globalCache = VideoCacheManager.getInstance().getCache(backgroundVideoUri);
+        if (globalCache != null && !globalCache.isEmpty()) {
+            Log.d(TAG, "Menggunakan Global Cache untuk BG video: " + globalCache.size() + " frames");
+            cachedFrames.addAll(globalCache);
+            videoPlaybackState = VideoPlaybackState.CACHED;
+            return;
+        }
+
+        videoPlaybackState = VideoPlaybackState.LOADING_CACHE;
+        final int w = designWidth;
+        final int h = designHeight;
+        final int frameBytes = w * h * 2; // RGB_565
+        final int maxCacheFrames = Math.max(30, targetFps * CACHE_MAX_DURATION_SECONDS);
+
+        prefetchDecoder = new VideoTextureDecoder(context, backgroundVideoUri, w, h, false, new VideoTextureDecoder.Listener() {
+            @Override
+            public void onFrame(Bitmap bitmap) {
+                if (videoPlaybackState != VideoPlaybackState.LOADING_CACHE) return;
+
+                long projectedBytes = (long) (cachedFrames.size() + 1) * frameBytes;
+                if (cachedFrames.size() >= maxCacheFrames || projectedBytes > CACHE_MEMORY_BUDGET_BYTES) {
+                    Log.d(TAG, "BG Cache budget full (" + cachedFrames.size() + " frames) -> fallback live");
+                    abandonCacheAndFallbackToLive();
+                    return;
+                }
+
+                Bitmap copy = bitmap.copy(Bitmap.Config.RGB_565, false);
+                if (copy != null) cachedFrames.add(copy);
+            }
+
+            @Override
+            public void onComplete() {
+                if (videoPlaybackState != VideoPlaybackState.LOADING_CACHE) return;
+                if (cachedFrames.isEmpty()) {
+                    abandonCacheAndFallbackToLive();
+                    return;
+                }
+                videoPlaybackState = VideoPlaybackState.CACHED;
+                Log.d(TAG, "BG Cache selesai: " + cachedFrames.size() + " frames");
+                if (prefetchDecoder != null) {
+                    prefetchDecoder.stop();
+                    prefetchDecoder = null;
+                }
+            }
+
+            @Override
+            public void onError(Exception e) {
+                Log.e(TAG, "BG Cache error, fallback live", e);
+                abandonCacheAndFallbackToLive();
+            }
+        });
+        prefetchDecoder.start();
+    }
+
+    private void abandonCacheAndFallbackToLive() {
+        videoPlaybackState = VideoPlaybackState.LIVE_STREAM;
+        recycleCachedFrames();
+        if (prefetchDecoder != null) {
+            prefetchDecoder.stop();
+            prefetchDecoder = null;
+        }
+
         videoBgDecoder = new VideoTextureDecoder(context, backgroundVideoUri, designWidth, designHeight,
                 bitmap -> {
                     synchronized (videoBgLock) {
@@ -335,22 +419,43 @@ public class CompositeSceneVideoSource extends VideoSource {
         videoBgDecoder.start();
     }
 
+    private void recycleCachedFrames() {
+        // JANGAN recycle jika itu milik VideoCacheManager (global)
+        List<Bitmap> globalCache = VideoCacheManager.getInstance().getCache(backgroundVideoUri);
+        if (globalCache != null && !globalCache.isEmpty()) {
+            cachedFrames.clear();
+            return;
+        }
+
+        for (Bitmap b : cachedFrames) {
+            if (b != null && !b.isRecycled()) b.recycle();
+        }
+        cachedFrames.clear();
+    }
+
     private void startCompositeDrawLoop() {
         drawThread = new Thread(() -> {
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
             long lastLog = 0L;
+            int cachedFrameIndex = 0;
 
-            // FIX PACING: sebelumnya frameTimeMs di-hardcode 33ms (30fps) dan sleep dihitung
-            // dari "elapsed sejak awal loop ini saja" - errornya tidak dikompensasi, jadi makin
-            // lama makin ngaco (drift menumpuk). Sekarang pakai jadwal absolut berbasis
-            // nanoTime yang mengikuti fps ASLI dari encoder (targetFps, diisi di create()),
-            // dan kalau sempat telat jauh (misal abis GC pause panjang) jadwal di-reset -
-            // bukan coba "kejar ketinggalan" dengan beruntun render tanpa sleep sama sekali
-            // (yang justru bikin makin patah-patah / thermal throttle).
             long frameIntervalNs = 1_000_000_000L / Math.max(1, targetFps);
             long nextFrameTimeNs = System.nanoTime();
 
-            while (running && targetSurface != null && targetSurface.isValid()) {
+            while (running) {
+                Surface surface = targetSurface;
+                if (surface == null || !surface.isValid()) {
+                    if (running) {
+                        try {
+                            Thread.sleep(10);
+                        } catch (InterruptedException e) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
+
                 long now = System.nanoTime();
                 if (now < nextFrameTimeNs) {
                     long sleepNs = nextFrameTimeNs - now;
@@ -361,9 +466,12 @@ public class CompositeSceneVideoSource extends VideoSource {
                     }
                 }
 
+                // Cek lagi setelah sleep
+                if (!running || surface != targetSurface || !surface.isValid()) continue;
+
                 Canvas canvas = null;
                 try {
-                    canvas = targetSurface.lockCanvas(null);
+                    canvas = surface.lockCanvas(null);
                     if (canvas != null) {
                         int cW = canvas.getWidth();
                         int cH = canvas.getHeight();
@@ -371,10 +479,15 @@ public class CompositeSceneVideoSource extends VideoSource {
                         canvas.save();
                         canvas.scale((float) cW / designWidth, (float) cH / designHeight);
 
-                        drawBackground(canvas, paint, designWidth, designHeight);
-                        drawLayers(canvas, paint, designWidth, designHeight);
+                        // FIX: Gunakan satu lock untuk seluruh proses drawing agar tidak crash saat stop()
+                        synchronized (videoBgLock) {
+                            drawBackground(canvas, paint, designWidth, designHeight, cachedFrameIndex);
+                            drawLayers(canvas, paint, designWidth, designHeight);
+                        }
 
                         canvas.restore();
+
+                        cachedFrameIndex++;
 
                         long logNow = System.currentTimeMillis();
                         if (logNow - lastLog > 5000) {
@@ -383,20 +496,27 @@ public class CompositeSceneVideoSource extends VideoSource {
                                     " into Canvas " + cW + "x" + cH + " @" + targetFps + "fps");
                         }
                     }
+                } catch (IllegalArgumentException | IllegalStateException e) {
+                    Log.w(TAG, "drawLoop: surface error (already locked or released), skipping frame");
+                } catch (Exception e) {
+                    Log.e(TAG, "drawLoop: unexpected error during draw", e);
                 } finally {
                     if (canvas != null) {
-                        targetSurface.unlockCanvasAndPost(canvas);
+                        try {
+                            surface.unlockCanvasAndPost(canvas);
+                        } catch (Exception e) {
+                            Log.w(TAG, "drawLoop: error unlocking canvas", e);
+                        }
                     }
                 }
 
                 nextFrameTimeNs += frameIntervalNs;
                 long lagNs = System.nanoTime() - nextFrameTimeNs;
                 if (lagNs > frameIntervalNs) {
-                    // Ketinggalan lebih dari 1 frame penuh (stall/GC pause panjang) - reset
-                    // jadwal daripada burst-render tanpa jeda untuk "kejar ketinggalan".
                     nextFrameTimeNs = System.nanoTime();
                 }
             }
+            Log.d(TAG, "drawLoop finished");
         }, "CompositeScene-draw");
         drawThread.start();
     }
@@ -411,19 +531,26 @@ public class CompositeSceneVideoSource extends VideoSource {
         return new Rect(left, top, left + w, top + h);
     }
 
-    private void drawBackground(Canvas canvas, Paint paint, int cW, int cH) {
+    private void drawBackground(Canvas canvas, Paint paint, int cW, int cH, int cachedFrameIndex) {
         canvas.drawColor(Color.BLACK);
         Bitmap bg = null;
-        if (backgroundType == BackgroundType.IMAGE) {
-            bg = backgroundImage;
-        } else if (backgroundType == BackgroundType.VIDEO) {
-            synchronized (videoBgLock) {
-                bg = currentVideoBgFrame;
+        synchronized (videoBgLock) {
+            if (backgroundType == BackgroundType.IMAGE) {
+                bg = backgroundImage;
+            } else if (backgroundType == BackgroundType.VIDEO) {
+                if (videoPlaybackState == VideoPlaybackState.CACHED && !cachedFrames.isEmpty()) {
+                    bg = cachedFrames.get(cachedFrameIndex % cachedFrames.size());
+                } else if (videoPlaybackState == VideoPlaybackState.LOADING_CACHE && !cachedFrames.isEmpty()) {
+                    bg = cachedFrames.get(0);
+                } else {
+                    bg = currentVideoBgFrame;
+                }
             }
-        }
-        if (bg != null) {
-            Rect dst = fillRect(bg.getWidth(), bg.getHeight(), cW, cH);
-            canvas.drawBitmap(bg, null, dst, paint);
+
+            if (bg != null && !bg.isRecycled()) {
+                Rect dst = fillRect(bg.getWidth(), bg.getHeight(), cW, cH);
+                canvas.drawBitmap(bg, null, dst, paint);
+            }
         }
     }
 
@@ -443,19 +570,8 @@ public class CompositeSceneVideoSource extends VideoSource {
                 synchronized (screenLock) {
                     bmp = currentScreenFrame;
                     if (bmp != null && !bmp.isRecycled()) {
-                        // FIX: Gunakan capW dan capH yang sudah dihitung di startScreenCapture
-                        // untuk membuang padding hasil imageToBitmap secara akurat.
                         Rect srcRect = new Rect(0, 0, capW, capH);
                         RectF cropDst = fillRectF(capW, capH, dst);
-
-                        long now = System.currentTimeMillis();
-                        if (now - lastLayerLogMs > 5000) {
-                            lastLayerLogMs = now;
-                            Log.d(TAG, "drawLayers(SCREEN): cap=" + capW + "x" + capH
-                                    + " bmpActual=" + bmp.getWidth() + "x" + bmp.getHeight()
-                                    + " -> dstBox=" + dst + " cropDst=" + cropDst);
-                        }
-
                         canvas.save();
                         canvas.clipRect(dst);
                         canvas.drawBitmap(bmp, srcRect, cropDst, paint);
@@ -465,8 +581,9 @@ public class CompositeSceneVideoSource extends VideoSource {
                 continue;
             }
 
-            if (bmp == null || bmp.isRecycled()) continue;
-            canvas.drawBitmap(bmp, null, dst, paint);
+            if (bmp != null && !bmp.isRecycled()) {
+                canvas.drawBitmap(bmp, null, dst, paint);
+            }
         }
     }
 

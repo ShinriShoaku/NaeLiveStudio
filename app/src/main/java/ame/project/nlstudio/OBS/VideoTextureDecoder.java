@@ -178,26 +178,33 @@ public class VideoTextureDecoder {
         if (decodeThread != null) {
             decodeThread.interrupt();
             try {
-                decodeThread.join(500);
+                decodeThread.join(200);
             } catch (InterruptedException ignored) {}
             decodeThread = null;
         }
 
         final Handler handler = glHandler;
         if (handler != null) {
-            final Object lock = new Object();
-            final boolean[] done = {false};
-            synchronized (lock) {
-                handler.post(() -> {
-                    releaseGlAndCodec();
-                    synchronized (lock) {
-                        done[0] = true;
-                        lock.notifyAll();
-                    }
-                });
-                try {
-                    while (!done[0]) lock.wait(500);
-                } catch (InterruptedException ignored) {}
+            if (handler.getLooper().getThread() == Thread.currentThread()) {
+                // FIX DEADLOCK: Jika dipanggil dari thread GL sendiri (misal dari onFrame callback),
+                // langsung eksekusi release tanpa post & wait.
+                releaseGlAndCodec();
+            } else {
+                final Object lock = new Object();
+                final boolean[] done = {false};
+                synchronized (lock) {
+                    handler.post(() -> {
+                        releaseGlAndCodec();
+                        synchronized (lock) {
+                            done[0] = true;
+                            lock.notifyAll();
+                        }
+                    });
+                    try {
+                        // Tunggu sebentar agar resource bersih, tapi jangan kelamaan (ANR)
+                        if (!done[0]) lock.wait(200);
+                    } catch (InterruptedException ignored) {}
+                }
             }
         }
         if (glThread != null) {

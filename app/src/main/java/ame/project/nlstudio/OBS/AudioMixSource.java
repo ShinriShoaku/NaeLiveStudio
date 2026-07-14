@@ -7,6 +7,8 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.media.projection.MediaProjection;
 import android.os.Build;
+import android.os.Process;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
@@ -14,16 +16,23 @@ import com.pedro.encoder.Frame;
 import com.pedro.encoder.input.audio.GetMicrophoneData;
 import com.pedro.encoder.input.sources.audio.AudioSource;
 
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
+
 /**
- * Custom audio source: capture MIC dan AUDIO SISTEM (atau audio dari satu aplikasi/game
- * tertentu lewat UID) secara TERPISAH, lalu di-mix manual dengan volume (gain) masing-masing
- * bisa diatur real-time (0.0f = mute, 1.0f = normal, sampai 2.0f = 2x lebih keras).
+ * Custom audio source: capture MIC and INTERNAL AUDIO separately and mix them manually.
+ * Fixes speed-up issues by using a fixed-size PCM pipeline and zero-filling missing data.
  */
 public class AudioMixSource extends AudioSource {
 
-    public static final int SAMPLE_RATE = 44100;
+    private int sampleRate = 44100;
+    private int channelCount = 2;
     private static final int CHANNEL_IN = AudioFormat.CHANNEL_IN_STEREO;
     private static final int ENCODING = AudioFormat.ENCODING_PCM_16BIT;
+
+    // Fixed frame size (e.g., 1024 samples = ~23.2ms at 44.1kHz)
+    private static final int SAMPLES_PER_FRAME = 1024;
 
     private final MediaProjection mediaProjection;
     private final int gameUid;
@@ -31,17 +40,23 @@ public class AudioMixSource extends AudioSource {
     private AudioRecord micRecord;
     private AudioRecord internalRecord;
     private Thread captureThread;
+    private Thread internalCaptureThread;
     private volatile boolean running = false;
     private GetMicrophoneData callback;
 
     private volatile float micGain = 1.0f;
     private volatile float internalGain = 1.0f;
 
-    private boolean micEnabled = true;
-    private boolean internalEnabled = true;
+    private volatile boolean micEnabled = true;
+    private volatile boolean internalEnabled = true;
 
     private int bufferSizeBytes;
     private long lastLevelPublishMs = 0L;
+
+    // Internal audio queue to synchronize with the main capture loop
+    private final BlockingQueue<byte[]> internalAudioQueue = new ArrayBlockingQueue<>(20);
+
+    private long nextPtsUs = 0;
 
     public AudioMixSource(MediaProjection mediaProjection, int gameUid) {
         super();
@@ -68,11 +83,13 @@ public class AudioMixSource extends AudioSource {
     @SuppressLint("MissingPermission")
     @RequiresApi(api = Build.VERSION_CODES.Q)
     private void setupRecords() {
-        bufferSizeBytes = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, ENCODING) * 2;
+        // Use a buffer size that is a multiple of our frame size
+        int minBuffer = AudioRecord.getMinBufferSize(sampleRate, CHANNEL_IN, ENCODING);
+        bufferSizeBytes = Math.max(minBuffer, SAMPLES_PER_FRAME * channelCount * 2) * 2;
 
         micRecord = new AudioRecord(
                 MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE, CHANNEL_IN, ENCODING, bufferSizeBytes
+                sampleRate, CHANNEL_IN, ENCODING, bufferSizeBytes
         );
 
         AudioPlaybackCaptureConfiguration.Builder configBuilder =
@@ -88,7 +105,7 @@ public class AudioMixSource extends AudioSource {
         internalRecord = new AudioRecord.Builder()
                 .setAudioFormat(new AudioFormat.Builder()
                         .setEncoding(ENCODING)
-                        .setSampleRate(SAMPLE_RATE)
+                        .setSampleRate(sampleRate)
                         .setChannelMask(CHANNEL_IN)
                         .build())
                 .setBufferSizeInBytes(bufferSizeBytes)
@@ -98,6 +115,8 @@ public class AudioMixSource extends AudioSource {
 
     @Override
     protected boolean create(int sampleRate, boolean isStereo, boolean echoCanceler, boolean noiseSuppressor) {
+        this.sampleRate = sampleRate;
+        this.channelCount = isStereo ? 2 : 1;
         return true;
     }
 
@@ -111,7 +130,17 @@ public class AudioMixSource extends AudioSource {
             internalRecord.startRecording();
             running = true;
 
-            captureThread = new Thread(this::captureLoop, "AudioMixSource-capture");
+            internalAudioQueue.clear();
+            nextPtsUs = 0;
+
+            // Dedicated thread to pull data from Internal Record into the queue
+            internalCaptureThread = new Thread(this::internalCaptureLoop, "AudioMixSource-internal");
+            internalCaptureThread.setPriority(Thread.MAX_PRIORITY);
+            internalCaptureThread.start();
+
+            // Main loop that mixes and pushes to the encoder
+            captureThread = new Thread(this::mainCaptureLoop, "AudioMixSource-main");
+            captureThread.setPriority(Thread.MAX_PRIORITY);
             captureThread.start();
         }
     }
@@ -120,14 +149,18 @@ public class AudioMixSource extends AudioSource {
     public void stop() {
         running = false;
         try {
-            if (captureThread != null) captureThread.join(500);
+            if (captureThread != null) captureThread.join(200);
+            if (internalCaptureThread != null) internalCaptureThread.join(200);
         } catch (InterruptedException ignored) {
         }
+        captureThread = null;
+        internalCaptureThread = null;
+
         releaseRecord(micRecord);
         releaseRecord(internalRecord);
         micRecord = null;
         internalRecord = null;
-        AudioLevelBus.publish(0f, 0f); // reset VU meter di UI pas audio berhenti
+        AudioLevelBus.publish(0f, 0f);
     }
 
     @Override
@@ -149,28 +182,72 @@ public class AudioMixSource extends AudioSource {
         record.release();
     }
 
-    private void captureLoop() {
-        int frameBytes = bufferSizeBytes;
-        byte[] micBuf = new byte[frameBytes];
-        byte[] internalBuf = new byte[frameBytes];
-        byte[] mixed = new byte[frameBytes];
-
+    private void internalCaptureLoop() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
+        int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
         while (running) {
-            int micRead = micEnabled ? micRecord.read(micBuf, 0, frameBytes) : 0;
-            int internalRead = internalEnabled ? internalRecord.read(internalBuf, 0, frameBytes) : 0;
-            int size = Math.max(micRead, internalRead);
-            if (size <= 0) continue;
-
-            mixPcm16(micBuf, micEnabled ? micRead : 0, micGain,
-                    internalBuf, internalEnabled ? internalRead : 0, internalGain,
-                    mixed, size);
-
-            mixAndPush(mixed, size);
-            publishLevelsThrottled(micBuf, micEnabled ? micRead : 0, internalBuf, internalEnabled ? internalRead : 0);
+            byte[] buf = new byte[bytesPerFrame];
+            int read = internalRecord.read(buf, 0, bytesPerFrame);
+            if (read > 0) {
+                if (internalAudioQueue.size() >= 10) {
+                    internalAudioQueue.poll();
+                }
+                internalAudioQueue.offer(read == bytesPerFrame ? buf : java.util.Arrays.copyOf(buf, read));
+            } else if (read < 0) {
+                break;
+            }
         }
     }
 
-    /** Hitung level RMS mic & sistem terus kirim ke AudioLevelBus buat VU meter, dibatasi ~15x/detik biar gak flood UI. */
+    private void mainCaptureLoop() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
+        int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
+        byte[] micBuf = new byte[bytesPerFrame];
+        byte[] mixedBuf = new byte[bytesPerFrame];
+
+        while (running) {
+            int micReadCount;
+            byte[] internalBuf;
+            int internalReadLen;
+
+            // MASTER CLOCK LOGIC
+            if (micEnabled && micRecord != null) {
+                // Mic is the master clock (blocking read)
+                micReadCount = micRecord.read(micBuf, 0, bytesPerFrame);
+                if (micReadCount < 0) break;
+                
+                // Try to get internal audio, don't wait long if it's missing (zero-fill later)
+                internalBuf = internalAudioQueue.poll();
+                internalReadLen = (internalBuf != null) ? internalBuf.length : 0;
+            } else {
+                // Internal is the master clock. 
+                // We use the queue as a regulator. If queue is empty, we wait to maintain cadence.
+                try {
+                    internalBuf = internalAudioQueue.poll(100, TimeUnit.MILLISECONDS);
+                    if (internalBuf != null) {
+                        internalReadLen = internalBuf.length;
+                    } else {
+                        // Timeout: generate silence to keep the timeline moving
+                        internalReadLen = 0; 
+                    }
+                } catch (InterruptedException e) {
+                    continue;
+                }
+                micReadCount = 0;
+            }
+
+            mixPcm16(micBuf, micReadCount, micGain,
+                    internalBuf != null ? internalBuf : new byte[0], 
+                    internalReadLen, internalGain,
+                    mixedBuf, bytesPerFrame);
+
+            mixAndPush(mixedBuf, bytesPerFrame);
+            
+            publishLevelsThrottled(micBuf, micReadCount, 
+                    internalBuf != null ? internalBuf : new byte[0], internalReadLen);
+        }
+    }
+
     private void publishLevelsThrottled(byte[] micBuf, int micLen, byte[] internalBuf, int internalLen) {
         long now = System.currentTimeMillis();
         if (now - lastLevelPublishMs < 66) return;
@@ -181,7 +258,6 @@ public class AudioMixSource extends AudioSource {
         AudioLevelBus.publish(Math.min(1f, micLevel), Math.min(1f, systemLevel));
     }
 
-    /** RMS PCM16 dinormalisasi ke 0..1, dikasih sedikit boost karena audio jarang beneran full-scale. */
     private float calcRmsLevel(byte[] buf, int len) {
         if (len <= 1) return 0f;
         long sumSquares = 0;
@@ -197,6 +273,9 @@ public class AudioMixSource extends AudioSource {
         return Math.min(1f, normalized);
     }
 
+    /**
+     * Mixes two PCM16 buffers. Zero-fills if inputs are smaller than size.
+     */
     private void mixPcm16(byte[] a, int aLen, float gainA,
                           byte[] b, int bLen, float gainB,
                           byte[] out, int size) {
@@ -214,8 +293,21 @@ public class AudioMixSource extends AudioSource {
     }
 
     private void mixAndPush(byte[] pcm, int size) {
-        if (callback != null) {
-            callback.inputPCMData(new Frame(pcm, 0, size, System.nanoTime() / 1000));
+        if (callback == null || size <= 0) return;
+
+        int bytesPerFrame = channelCount * 2;
+        int validSize = size - (size % bytesPerFrame);
+        if (validSize <= 0) return;
+
+        long nowUs = System.nanoTime() / 1000L;
+        if (nextPtsUs == 0) {
+            nextPtsUs = nowUs;
         }
+
+        // Use Arrays.copyOf to avoid data corruption if encoder is slow
+        callback.inputPCMData(new Frame(java.util.Arrays.copyOf(pcm, validSize), 0, validSize, nextPtsUs));
+
+        long frames = validSize / bytesPerFrame;
+        nextPtsUs += (frames * 1_000_000L) / sampleRate;
     }
 }

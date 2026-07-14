@@ -12,7 +12,10 @@ import ame.project.nlstudio.scene.SceneRepository
 import ame.project.nlstudio.ui.SceneCanvasView
 import ame.project.nlstudio.ui.VuMeterView
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.media.projection.MediaProjectionManager
@@ -26,14 +29,18 @@ import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ProgressBar
 import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import ame.project.nlstudio.OBS.VideoCacheManager
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.google.firebase.analytics.FirebaseAnalytics
 import java.util.UUID
 
 /**
@@ -53,6 +60,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var tvStatus: TextView
     private lateinit var projectionManager: MediaProjectionManager
+    private lateinit var firebaseAnalytics: FirebaseAnalytics
 
     // Top Bar UI
     private lateinit var btnSettings: android.widget.ImageButton
@@ -130,6 +138,15 @@ class MainActivity : AppCompatActivity() {
     private var editingBackgroundUri: String? = null
     private var editingLayers: MutableList<SceneLayer> = mutableListOf()
     private var selectedLayerId: String? = null
+
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == StreamService.ACTION_STATUS_BROADCAST) {
+                val msg = intent.getStringExtra(StreamService.EXTRA_STATUS_MSG)
+                tvStatus.text = msg ?: "Status: idle"
+            }
+        }
+    }
 
     private lateinit var serverPresets: Array<String>
 
@@ -236,6 +253,10 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // Obtain the FirebaseAnalytics instance.
+        firebaseAnalytics = FirebaseAnalytics.getInstance(this)
+        firebaseAnalytics.logEvent(FirebaseAnalytics.Event.APP_OPEN, null)
+
         sceneRepository = SceneRepository(this)
         scenes = sceneRepository.loadScenes()
 
@@ -329,6 +350,9 @@ class MainActivity : AppCompatActivity() {
         // Load initial scene to canvas
         val initialScene = scenes.find { it.id == activeSceneId } ?: scenes.firstOrNull()
         initialScene?.let { switchToScene(it, updateService = savedInstanceState == null) }
+        
+        // Prefetch SEMUA video background di background agar siap saat dibutuhkan
+        prefetchAllVideoScenes()
 
         // Force UI update for initial scene even if panel not bound yet
         refreshCanvasBackground()
@@ -352,6 +376,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        val filter = IntentFilter(StreamService.ACTION_STATUS_BROADCAST)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(statusReceiver, filter)
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        unregisterReceiver(statusReceiver)
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         AudioLevelBus.setListener(null)
@@ -360,6 +399,8 @@ class MainActivity : AppCompatActivity() {
     private fun showSettingsDialog() {
         // Ensure the view is removed from its parent if it was already shown
         (dialogSettingsView.parent as? android.view.ViewGroup)?.removeView(dialogSettingsView)
+
+        firebaseAnalytics.logEvent("settings_open", null)
 
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Settings Connection & Quality")
@@ -647,6 +688,13 @@ class MainActivity : AppCompatActivity() {
         editingSceneId = scene.id
         refreshSceneList()
         switchToScene(scene)
+
+        // Prefetch video background di background setelah simpan (tanpa dialog) agar siap nanti
+        if (scene.backgroundType == BackgroundType.VIDEO && scene.backgroundUri != null) {
+            VideoCacheManager.getInstance().prefetch(this, Uri.parse(scene.backgroundUri),
+                scene.rootWidth, scene.rootHeight, 30, 250L * 1024 * 1024, null)
+        }
+
         Toast.makeText(this, "Scene \"${scene.name}\" disimpan", Toast.LENGTH_SHORT).show()
     }
 
@@ -808,12 +856,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (editingBackgroundType == BackgroundType.VIDEO && editingBackgroundUri != null) {
-            // Video background beneran DIMUTER (motion), bukan cuma nampilin 1 frame statis.
             val uri = Uri.parse(editingBackgroundUri)
             val loop = cbLoopVideo?.isChecked ?: true
-            sceneCanvasView.setBackgroundVideo(uri, loop = loop, autoPlay = true)
+
+            // Jika sedang LIVE/Record, jangan putar otomatis di editor saat pindah scene biar CPU enteng.
+            // User masih tetap bisa klik tombol Play secara manual kalau mau cek.
+            val autoPlay = !StreamService.isServiceRunning
+            
+            sceneCanvasView.setBackgroundVideo(uri, loop = loop, autoPlay = autoPlay)
+            
             isEmptyHint?.visibility = View.GONE
-            btnPlayVideo?.setImageResource(android.R.drawable.ic_media_pause)
+            if (autoPlay) {
+                btnPlayVideo?.setImageResource(android.R.drawable.ic_media_pause)
+            } else {
+                btnPlayVideo?.setImageResource(android.R.drawable.ic_media_play)
+            }
             return
         }
 
@@ -912,13 +969,18 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "=== switchToScene === updateService=$updateService")
         Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
 
+        val params = Bundle().apply {
+            putString(FirebaseAnalytics.Param.ITEM_ID, scene.id)
+            putString(FirebaseAnalytics.Param.ITEM_NAME, scene.name)
+            putString(FirebaseAnalytics.Param.CONTENT_TYPE, scene.backgroundType.name)
+        }
+        firebaseAnalytics.logEvent("scene_switch", params)
+
         activeSceneId = scene.id
         tvSceneNameTitle.text = scene.name
         refreshSceneList()
 
-        if (scene.backgroundType != BackgroundType.SCREEN) {
-            loadSceneIntoEditor(scene)
-        }
+        loadSceneIntoEditor(scene)
 
         if (!updateService) return
 
@@ -1041,6 +1103,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Isi Server URL dan Stream Key dulu", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
+            firebaseAnalytics.logEvent("stream_start_clicked", null)
             pendingAction = StreamService.ACTION_START
             checkPermissionsThenStart()
         }
@@ -1048,13 +1111,18 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnTestRecord)?.setOnClickListener {
             val encoderLabel = spinnerEncoderType.selectedItem.toString()
             Toast.makeText(this, "Merekam 30 detik pakai encoder: $encoderLabel", Toast.LENGTH_SHORT).show()
+            firebaseAnalytics.logEvent("record_start_clicked", null)
             pendingAction = StreamService.ACTION_TEST_RECORD
             checkPermissionsThenStart()
         }
 
         findViewById<Button>(R.id.btnStop).setOnClickListener {
+            firebaseAnalytics.logEvent("stream_stop_clicked", null)
             stopService(Intent(this, StreamService::class.java))
             tvStatus.text = "Status: stopped"
+            // Setelah stop, preview video di editor bisa jalan lagi
+            StreamService.isServiceRunning = false 
+            refreshCanvasBackground()
         }
 
         // Setup Scene Manager Dialog buttons (if it was inflated)
@@ -1128,10 +1196,86 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isEmpty()) {
-            requestScreenCapture()
+            startPreCachingAllNecessary {
+                requestScreenCapture()
+            }
         } else {
             permissionLauncher.launch(missing.toTypedArray())
         }
+    }
+
+    private fun prefetchAllVideoScenes() {
+        scenes.forEach { scene ->
+            if (scene.backgroundType == BackgroundType.VIDEO && scene.backgroundUri != null) {
+                VideoCacheManager.getInstance().prefetch(this, Uri.parse(scene.backgroundUri),
+                    scene.rootWidth, scene.rootHeight, 30, 250L * 1024 * 1024, null)
+            }
+        }
+    }
+
+    private fun startPreCachingAllNecessary(onComplete: () -> Unit) {
+        val scenesToCache = scenes.filter {
+            it.backgroundType == BackgroundType.VIDEO &&
+            it.backgroundUri != null &&
+            !VideoCacheManager.getInstance().isCached(Uri.parse(it.backgroundUri))
+        }
+
+        if (scenesToCache.isEmpty()) {
+            onComplete()
+            return
+        }
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_loading, null)
+        val progressBar = dialogView.findViewById<ProgressBar>(R.id.progressBar)
+        val tvProgress = dialogView.findViewById<TextView>(R.id.tvLoadingText)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Menyiapkan Semua Scene Video")
+            .setView(dialogView)
+            .setCancelable(false)
+            .show()
+
+        var currentIdx = 0
+        
+        fun cacheNext() {
+            if (currentIdx >= scenesToCache.size) {
+                runOnUiThread {
+                    dialog.dismiss()
+                    onComplete()
+                }
+                return
+            }
+
+            val scene = scenesToCache[currentIdx]
+            val p = collectStreamParams()
+            val sceneName = scene.name
+            
+            runOnUiThread {
+                tvProgress.text = "Caching scene ($sceneName) - ${currentIdx + 1}/${scenesToCache.size}"
+                progressBar.progress = (currentIdx * 100 / scenesToCache.size)
+                tvStatus.text = "Caching: $sceneName..."
+            }
+
+            VideoCacheManager.getInstance().prefetch(this, Uri.parse(scene.backgroundUri!!),
+                p.width, p.height, p.fps, 250L * 1024 * 1024,
+                object : VideoCacheManager.ProgressListener {
+                    override fun onProgress(frames: Int) {
+                        runOnUiThread {
+                            // Progres internal per video (0-100% dari alokasi index ini)
+                            val internalProgress = (frames * 100 / 300).coerceAtMost(100)
+                            val totalProgress = (currentIdx * 100 + internalProgress) / scenesToCache.size
+                            progressBar.progress = totalProgress
+                        }
+                    }
+
+                    override fun onComplete() {
+                        currentIdx++
+                        cacheNext()
+                    }
+                })
+        }
+
+        cacheNext()
     }
 
     private fun requestScreenCapture() {
@@ -1250,8 +1394,18 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        val params = Bundle().apply {
+            putInt(FirebaseAnalytics.Param.VALUE, p.width)
+            putInt("height", p.height)
+            putInt("fps", p.fps)
+            putInt(FirebaseAnalytics.Param.LEVEL, p.vBitrate)
+        }
+        firebaseAnalytics.logEvent("stream_started", params)
+
         ContextCompat.startForegroundService(this, intent)
         tvStatus.text = "Status: live streaming..."
+        refreshCanvasBackground()
     }
 
     private fun startTestRecordService(resultCode: Int, data: Intent) {
@@ -1285,6 +1439,7 @@ class MainActivity : AppCompatActivity() {
         }
         ContextCompat.startForegroundService(this, intent)
         tvStatus.text = "Status: test recording..."
+        refreshCanvasBackground()
     }
 
     private data class StreamParams(
