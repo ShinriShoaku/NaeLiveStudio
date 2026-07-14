@@ -829,7 +829,15 @@ public class StreamService extends Service implements ConnectChecker {
                 }
                 break;
             case 2: // Mic Only
-                rtmpStream.changeAudioSource(new MicrophoneSource());
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    audioMixSource = new AudioMixSource(mediaProjection, -1);
+                    audioMixSource.setInternalEnabled(false);
+                    audioMixSource.setInternalGain(0f);
+                    audioMixSource.setMicGain(micGain);
+                    rtmpStream.changeAudioSource(audioMixSource);
+                } else {
+                    rtmpStream.changeAudioSource(new MicrophoneSource());
+                }
                 break;
             case 3: // Muted
                 break;

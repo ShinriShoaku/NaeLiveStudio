@@ -77,7 +77,19 @@ public class AudioMixSource extends AudioSource {
     }
 
     public void setInternalEnabled(boolean enabled) {
+        if (this.internalEnabled == enabled) return;
         this.internalEnabled = enabled;
+        // If disabled mid-stream, we can stop the record to be 100% sure no capture happens.
+        // It will be restarted by setupRecords if needed, or we can just leave it stopped.
+        if (!enabled && internalRecord != null && internalRecord.getState() == AudioRecord.STATE_INITIALIZED) {
+            try {
+                internalRecord.stop();
+            } catch (Exception ignored) {}
+        } else if (enabled && internalRecord != null && running) {
+            try {
+                internalRecord.startRecording();
+            } catch (Exception ignored) {}
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -217,17 +229,30 @@ public class AudioMixSource extends AudioSource {
                 if (micReadCount < 0) break;
                 
                 // Try to get internal audio, don't wait long if it's missing (zero-fill later)
-                internalBuf = internalAudioQueue.poll();
-                internalReadLen = (internalBuf != null) ? internalBuf.length : 0;
+                // If internal audio is disabled, we don't even poll the queue
+                if (internalEnabled) {
+                    internalBuf = internalAudioQueue.poll();
+                    internalReadLen = (internalBuf != null) ? internalBuf.length : 0;
+                } else {
+                    internalBuf = null;
+                    internalReadLen = 0;
+                }
             } else {
                 // Internal is the master clock. 
                 // We use the queue as a regulator. If queue is empty, we wait to maintain cadence.
                 try {
-                    internalBuf = internalAudioQueue.poll(100, TimeUnit.MILLISECONDS);
+                    if (internalEnabled) {
+                        internalBuf = internalAudioQueue.poll(100, TimeUnit.MILLISECONDS);
+                    } else {
+                        // Even if internal is disabled, if mic is also disabled, we must wait to maintain timing
+                        Thread.sleep(SAMPLES_PER_FRAME * 1000L / sampleRate);
+                        internalBuf = null;
+                    }
+                    
                     if (internalBuf != null) {
                         internalReadLen = internalBuf.length;
                     } else {
-                        // Timeout: generate silence to keep the timeline moving
+                        // Timeout or disabled: generate silence to keep the timeline moving
                         internalReadLen = 0; 
                     }
                 } catch (InterruptedException e) {
@@ -236,9 +261,9 @@ public class AudioMixSource extends AudioSource {
                 micReadCount = 0;
             }
 
-            mixPcm16(micBuf, micReadCount, micGain,
-                    internalBuf != null ? internalBuf : new byte[0], 
-                    internalReadLen, internalGain,
+            mixPcm16(micBuf, (micEnabled ? micReadCount : 0), micGain,
+                    (internalEnabled && internalBuf != null) ? internalBuf : new byte[0], 
+                    (internalEnabled ? internalReadLen : 0), internalGain,
                     mixedBuf, bytesPerFrame);
 
             mixAndPush(mixedBuf, bytesPerFrame);
