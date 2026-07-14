@@ -7,23 +7,57 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
-import android.media.MediaPlayer;
 import android.net.Uri;
+import android.util.Log;
 import android.view.Surface;
 
 import androidx.annotation.NonNull;
 
 import com.pedro.encoder.input.sources.video.VideoSource;
 
-import java.io.IOException;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Fake scene / scene tambahan: menampilkan GAMBAR STATIS (looping) atau VIDEO FILE (looping)
  * ke Surface milik encoder.
+ *
+ * MODE VIDEO_FILE - STRATEGI CACHE FRAME (hemat CPU/GPU):
+ * Karena video fake scene biasanya klip pendek yang di-loop TERUS-MENERUS selama live, decode
+ * ulang tiap frame secara real-time itu boros CPU/GPU secara percuma - isi videonya kan sama
+ * berulang-ulang. Jadi sekarang:
+ *   1) Video di-decode SEKALI SAJA (non-loop) lewat VideoTextureDecoder, tiap frame hasilnya
+ *      di-copy ke Bitmap RGB_565 (separuh memori dibanding ARGB_8888 - video tidak butuh alpha)
+ *      dan disimpan di array di RAM.
+ *   2) Setelah decode sekali itu selesai, decoder DIMATIKAN TOTAL. Sisa waktu live, draw-loop
+ *      cuma GILIR Bitmap dari array itu (persis seperti mode STATIC_IMAGE, cuma gambarnya ganti-
+ *      ganti tiap frame) - nyaris tidak ada beban CPU/GPU dibanding decode real-time terus-menerus.
+ *
+ * GUARD RAIL (karena resolusi & durasi video upload user macem-macem, gak bisa diasumsikan
+ * selalu kecil/pendek): ada batas memori (CACHE_MEMORY_BUDGET_BYTES) dan batas durasi cache
+ * (CACHE_MAX_DURATION_SECONDS). Begitu salah satu batas ini kelewat SAAT proses cache masih
+ * berjalan, cache yang sudah terkumpul langsung dibuang dan otomatis PINDAH ke mode live-decode-
+ * streaming (decoder jalan terus real-time, tidak pernah simpan semua frame di RAM) - jadi video
+ * panjang/beresolusi besar tetap AMAN diputar, cuma gak sehemat mode cache.
+ *
+ * Baik mode cache maupun mode live-streaming, decoder SELALU decode ke Surface OFF-SCREEN milik
+ * VideoTextureDecoder sendiri (bukan Surface encoder) - draw-loop kita sendiri (pacing absolut
+ * nanoTime, sama seperti mode STATIC_IMAGE) yang gambar hasilnya ke Surface encoder. Ini mencegah
+ * freeze di tengah rekaman yang dulu terjadi waktu MediaPlayer nulis LANGSUNG ke Surface encoder
+ * (decoder bisa blocking kalau BufferQueue penuh & konsumer encoder belum sempat menariknya).
  */
 public class FakeSceneVideoSource extends VideoSource {
 
+    private static final String TAG = "FakeSceneVideoSource";
+
+    // Budget memori cache. ~250MB cukup buat klip pendek-menengah; disesuaikan lagi kalau perlu.
+    private static final long CACHE_MEMORY_BUDGET_BYTES = 250L * 1024 * 1024;
+    // Batas durasi cache dalam DETIK (dihitung terhadap fps asli dari encoder). Video lebih
+    // panjang dari ini otomatis fallback ke live-streaming, bukan dipotong/di-cache sebagian.
+    private static final int CACHE_MAX_DURATION_SECONDS = 20;
+
     public enum Mode { STATIC_IMAGE, VIDEO_FILE }
+
+    private enum VideoPlaybackState { LOADING_CACHE, CACHED, LIVE_STREAM }
 
     private final Context context;
     private final Mode mode;
@@ -31,9 +65,18 @@ public class FakeSceneVideoSource extends VideoSource {
     private final Uri videoUri;
 
     private Surface targetSurface;
-    private MediaPlayer mediaPlayer;
-    private Thread staticDrawThread;
+    private Thread drawThread;
     private volatile boolean running = false;
+    // FPS asli dari encoder (lewat create()), dipakai buat pacing loop gambar.
+    private volatile int targetFps = 30;
+
+    // ---- State khusus mode VIDEO_FILE ----
+    private volatile VideoPlaybackState videoPlaybackState = VideoPlaybackState.LOADING_CACHE;
+    private final CopyOnWriteArrayList<Bitmap> cachedFrames = new CopyOnWriteArrayList<>();
+    private VideoTextureDecoder prefetchDecoder; // decode sekali jalan buat isi cache (loop=false)
+    private VideoTextureDecoder liveDecoder;     // fallback real-time (loop=true), dipakai kalau cache dibatalkan
+    private volatile Bitmap latestLiveFrame;
+    private final Object liveFrameLock = new Object();
 
     public FakeSceneVideoSource(Context context, Bitmap staticImage) {
         super();
@@ -60,6 +103,7 @@ public class FakeSceneVideoSource extends VideoSource {
     protected boolean create(int width, int height, int fps, int rotation) {
         setWidth(width);
         setHeight(height);
+        this.targetFps = fps > 0 ? fps : 30;
         return true;
     }
 
@@ -74,29 +118,36 @@ public class FakeSceneVideoSource extends VideoSource {
 
         this.targetSurface = new Surface(surfaceTexture);
         running = true;
-        if (mode == Mode.STATIC_IMAGE) {
-            startStaticImageLoop();
-        } else {
-            startVideoFileLoop();
+
+        if (mode == Mode.VIDEO_FILE) {
+            startVideoPlayback(w, h);
         }
+        startDrawLoop();
     }
 
     @Override
     public void stop() {
         running = false;
-        if (staticDrawThread != null) {
+        // Cegah callback prefetch yang masih nyangkut nulis ke cache setelah stop() dipanggil.
+        videoPlaybackState = VideoPlaybackState.LIVE_STREAM;
+
+        if (drawThread != null) {
             try {
-                staticDrawThread.join(300);
+                drawThread.join(300);
             } catch (InterruptedException ignored) {}
-            staticDrawThread = null;
+            drawThread = null;
         }
-        if (mediaPlayer != null) {
-            try {
-                mediaPlayer.stop();
-            } catch (Exception ignored) {}
-            mediaPlayer.release();
-            mediaPlayer = null;
+        if (prefetchDecoder != null) {
+            prefetchDecoder.stop();
+            prefetchDecoder = null;
         }
+        if (liveDecoder != null) {
+            liveDecoder.stop();
+            liveDecoder = null;
+        }
+        recycleCachedFrames();
+        latestLiveFrame = null;
+
         if (targetSurface != null) {
             targetSurface.release();
             targetSurface = null;
@@ -113,12 +164,126 @@ public class FakeSceneVideoSource extends VideoSource {
         return running;
     }
 
-    private void startStaticImageLoop() {
-        staticDrawThread = new Thread(() -> {
-            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            long frameTimeMs = 33; // ~30fps
+    private void recycleCachedFrames() {
+        for (Bitmap b : cachedFrames) {
+            if (b != null && !b.isRecycled()) {
+                b.recycle();
+            }
+        }
+        cachedFrames.clear();
+    }
+
+    /** Mulai proses cache (decode sekali, non-loop). Kalau nabrak budget, otomatis fallback live. */
+    private void startVideoPlayback(final int w, final int h) {
+        videoPlaybackState = VideoPlaybackState.LOADING_CACHE;
+
+        final int frameBytes = w * h * 2; // RGB_565 = 2 byte/pixel
+        final int maxCacheFrames = Math.max(30, targetFps * CACHE_MAX_DURATION_SECONDS);
+
+        prefetchDecoder = new VideoTextureDecoder(context, videoUri, w, h, false, new VideoTextureDecoder.Listener() {
+            @Override
+            public void onFrame(Bitmap bitmap) {
+                if (videoPlaybackState != VideoPlaybackState.LOADING_CACHE) {
+                    return; // sudah selesai/dibatalkan sebelumnya, abaikan frame nyasar
+                }
+
+                long projectedBytes = (long) (cachedFrames.size() + 1) * frameBytes;
+                if (cachedFrames.size() >= maxCacheFrames || projectedBytes > CACHE_MEMORY_BUDGET_BYTES) {
+                    Log.d(TAG, "Cache budget kelewat (frame=" + cachedFrames.size()
+                            + ", bytes=" + projectedBytes + ") -> fallback ke live-streaming");
+                    abandonCacheAndFallbackToLive(w, h);
+                    return;
+                }
+
+                // Copy WAJIB: bitmap dari callback ini double-buffer milik decoder, isinya akan
+                // ditimpa lagi di frame berikutnya. Sekalian convert ke RGB_565 buat hemat memori.
+                Bitmap copy = bitmap.copy(Bitmap.Config.RGB_565, false);
+                if (copy != null) {
+                    cachedFrames.add(copy);
+                }
+            }
+
+            @Override
+            public void onComplete() {
+                if (videoPlaybackState != VideoPlaybackState.LOADING_CACHE) {
+                    return; // sudah keburu fallback ke live sebelum sempat onComplete
+                }
+                if (cachedFrames.isEmpty()) {
+                    // Gagal dapat frame sama sekali - jaga-jaga fallback ke live.
+                    abandonCacheAndFallbackToLive(w, h);
+                    return;
+                }
+                videoPlaybackState = VideoPlaybackState.CACHED;
+                Log.d(TAG, "Cache video selesai: " + cachedFrames.size() + " frame @" + w + "x" + h);
+                stopDecoderAsync(prefetchDecoder);
+                prefetchDecoder = null;
+            }
+
+            @Override
+            public void onError(Exception e) {
+                Log.e(TAG, "Prefetch decoder error, fallback ke live-streaming", e);
+                abandonCacheAndFallbackToLive(w, h);
+            }
+        });
+        prefetchDecoder.start();
+    }
+
+    /** Buang cache parsial & pindah ke mode decode real-time terus-menerus (loop=true). */
+    private synchronized void abandonCacheAndFallbackToLive(int w, int h) {
+        if (videoPlaybackState == VideoPlaybackState.LIVE_STREAM) {
+            return; // sudah fallback sebelumnya, jangan dobel start decoder
+        }
+        videoPlaybackState = VideoPlaybackState.LIVE_STREAM;
+
+        recycleCachedFrames();
+        stopDecoderAsync(prefetchDecoder);
+        prefetchDecoder = null;
+
+        liveDecoder = new VideoTextureDecoder(context, videoUri, w, h, true,
+                bitmap -> {
+                    synchronized (liveFrameLock) {
+                        latestLiveFrame = bitmap;
+                    }
+                });
+        liveDecoder.start();
+    }
+
+    /**
+     * Panggil decoder.stop() di thread LAIN (bukan thread saat ini). Wajib dipakai kalau
+     * pemanggilan terjadi dari DALAM callback milik decoder itu sendiri (onFrame/onComplete/
+     * onError berjalan di GL-handler-thread internal VideoTextureDecoder) - decoder.stop() yang
+     * asli itu blocking (post + wait ke thread yang sama), jadi kalau dipanggil langsung dari
+     * thread-nya sendiri akan DEADLOCK.
+     */
+    private void stopDecoderAsync(final VideoTextureDecoder decoder) {
+        if (decoder == null) return;
+        new Thread(decoder::stop, "FakeSceneVideoSource-decoder-stop").start();
+    }
+
+    /**
+     * Draw-loop tunggal buat semua mode. Pacing pakai jadwal absolut berbasis nanoTime + fps
+     * asli dari encoder, bukan hardcode 33ms dengan sleep dihitung dari elapsed loop saat ini
+     * saja (drift menumpuk seiring waktu). Lihat penjelasan sama di CompositeSceneVideoSource.
+     */
+    private void startDrawLoop() {
+        drawThread = new Thread(() -> {
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+
+            long frameIntervalNs = 1_000_000_000L / Math.max(1, targetFps);
+            long nextFrameTimeNs = System.nanoTime();
+            int cacheFrameIndex = 0;
+
             while (running && targetSurface != null && targetSurface.isValid()) {
-                long startTime = System.currentTimeMillis();
+                long now = System.nanoTime();
+                if (now < nextFrameTimeNs) {
+                    long sleepNs = nextFrameTimeNs - now;
+                    try {
+                        Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+
                 Canvas canvas = null;
                 try {
                     canvas = targetSurface.lockCanvas(null);
@@ -126,9 +291,37 @@ public class FakeSceneVideoSource extends VideoSource {
                         int cW = canvas.getWidth();
                         int cH = canvas.getHeight();
                         canvas.drawColor(Color.BLACK);
-                        if (staticImage != null) {
-                            Rect dst = fitCenterRect(staticImage.getWidth(), staticImage.getHeight(), cW, cH);
-                            canvas.drawBitmap(staticImage, null, dst, paint);
+
+                        Bitmap frame = null;
+                        if (mode == Mode.STATIC_IMAGE) {
+                            frame = staticImage;
+                        } else {
+                            switch (videoPlaybackState) {
+                                case CACHED:
+                                    if (!cachedFrames.isEmpty()) {
+                                        frame = cachedFrames.get(cacheFrameIndex % cachedFrames.size());
+                                        cacheFrameIndex++;
+                                    }
+                                    break;
+                                case LOADING_CACHE:
+                                    // Sambil nunggu cache lengkap, freeze di frame pertama yang
+                                    // sudah masuk (kalau ada) supaya tidak kelihatan hitam kosong.
+                                    if (!cachedFrames.isEmpty()) {
+                                        frame = cachedFrames.get(0);
+                                    }
+                                    break;
+                                case LIVE_STREAM:
+                                default:
+                                    synchronized (liveFrameLock) {
+                                        frame = latestLiveFrame;
+                                    }
+                                    break;
+                            }
+                        }
+
+                        if (frame != null && !frame.isRecycled()) {
+                            Rect dst = fitCenterRect(frame.getWidth(), frame.getHeight(), cW, cH);
+                            canvas.drawBitmap(frame, null, dst, paint);
                         }
                     }
                 } finally {
@@ -136,19 +329,15 @@ public class FakeSceneVideoSource extends VideoSource {
                         targetSurface.unlockCanvasAndPost(canvas);
                     }
                 }
-                
-                long elapsed = System.currentTimeMillis() - startTime;
-                long sleep = frameTimeMs - elapsed;
-                if (sleep > 0) {
-                    try {
-                        Thread.sleep(sleep);
-                    } catch (InterruptedException e) {
-                        break;
-                    }
+
+                nextFrameTimeNs += frameIntervalNs;
+                long lagNs = System.nanoTime() - nextFrameTimeNs;
+                if (lagNs > frameIntervalNs) {
+                    nextFrameTimeNs = System.nanoTime();
                 }
             }
-        }, "FakeSceneVideoSource-image");
-        staticDrawThread.start();
+        }, "FakeSceneVideoSource-draw");
+        drawThread.start();
     }
 
     private Rect fitCenterRect(int srcW, int srcH, int dstW, int dstH) {
@@ -158,19 +347,5 @@ public class FakeSceneVideoSource extends VideoSource {
         int left = (dstW - w) / 2;
         int top = (dstH - h) / 2;
         return new Rect(left, top, left + w, top + h);
-    }
-
-    private void startVideoFileLoop() {
-        try {
-            mediaPlayer = new MediaPlayer();
-            mediaPlayer.setDataSource(context, videoUri);
-            mediaPlayer.setSurface(targetSurface);
-            mediaPlayer.setLooping(true);
-            mediaPlayer.setVolume(0f, 0f);
-            mediaPlayer.prepare();
-            mediaPlayer.start();
-        } catch (IOException e) {
-            running = false;
-        }
     }
 }

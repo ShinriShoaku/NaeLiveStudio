@@ -13,7 +13,6 @@ import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.media.Image;
 import android.media.ImageReader;
-import android.media.MediaMetadataRetriever;
 import android.media.projection.MediaProjection;
 import android.net.Uri;
 import android.os.Handler;
@@ -78,12 +77,17 @@ public class CompositeSceneVideoSource extends VideoSource {
 
     private Surface targetSurface;
     private Thread drawThread;
-    private Thread videoBgThread;
+    private VideoTextureDecoder videoBgDecoder;
     private volatile boolean running = false;
     private volatile Bitmap currentVideoBgFrame;
+    private final Object videoBgLock = new Object();
 
     private int designWidth = 1080;
     private int designHeight = 1920;
+
+    // FPS asli yang diminta encoder lewat create(). Dipakai buat pacing draw loop biar
+    // gak hardcode 30fps - kalau user pilih 24/25/60fps di UI, draw loop ikut menyesuaikan.
+    private volatile int targetFps = 30;
 
     // Resolusi ASLI yang diminta encoder lewat create(). Ini yang dipakai buat set ukuran
     // buffer SurfaceTexture, BUKAN designWidth/designHeight (yang cuma dipakai buat hitung
@@ -132,6 +136,7 @@ public class CompositeSceneVideoSource extends VideoSource {
     protected boolean create(int width, int height, int fps, int rotation) {
         this.encoderWidth = width;
         this.encoderHeight = height;
+        this.targetFps = fps > 0 ? fps : 30;
         Log.d(TAG, "create(): encoder minta " + width + "x" + height + " fps=" + fps);
         return true;
     }
@@ -253,7 +258,14 @@ public class CompositeSceneVideoSource extends VideoSource {
     public void stop() {
         running = false;
         joinQuietly(drawThread);
-        joinQuietly(videoBgThread);
+
+        if (videoBgDecoder != null) {
+            videoBgDecoder.stop();
+            videoBgDecoder = null;
+        }
+        synchronized (videoBgLock) {
+            currentVideoBgFrame = null;
+        }
 
         if (virtualDisplay != null) {
             virtualDisplay.release();
@@ -277,7 +289,6 @@ public class CompositeSceneVideoSource extends VideoSource {
         }
 
         drawThread = null;
-        videoBgThread = null;
         if (targetSurface != null) {
             targetSurface.release();
             targetSurface = null;
@@ -302,58 +313,54 @@ public class CompositeSceneVideoSource extends VideoSource {
         }
     }
 
+    /**
+     * FIX SMOOTHNESS: sebelumnya di sini pakai MediaMetadataRetriever.getFrameAtTime() yang
+     * dipanggil berulang tiap ~33ms - itu didesain buat ambil thumbnail sesekali, BUKAN
+     * playback real-time (tiap panggilan seek + redecode dari keyframe terdekat, bisa >100ms).
+     * Itu penyebab utama background video patah-patah.
+     *
+     * Sekarang pakai VideoTextureDecoder: video didecode terus-menerus lewat MediaPlayer ->
+     * SurfaceTexture -> GL, dan frame baru cuma diproses saat memang tersedia (event-driven,
+     * bukan polling). Hasilnya ditulis ke currentVideoBgFrame dengan lock singkat + double
+     * buffer di dalam VideoTextureDecoder supaya draw thread di bawah tidak pernah baca frame
+     * yang sedang setengah ditulis (anti-tearing).
+     */
     private void startVideoBackgroundLoop() {
-        videoBgThread = new Thread(() -> {
-            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-            long durationUs;
-            try {
-                retriever.setDataSource(context, backgroundVideoUri);
-                String durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-                durationUs = (durStr != null ? Long.parseLong(durStr) : 3000) * 1000L;
-                if (durationUs <= 0) durationUs = 3000000L;
-            } catch (Exception e) {
-                durationUs = 3000000L;
-            }
-
-            long positionUs = 0;
-            long frameIntervalUs = 33333L; // ~30fps
-            while (running) {
-                long start = System.currentTimeMillis();
-                try {
-                    // CATATAN: MediaMetadataRetriever sangat lambat untuk real-time.
-                    // OPTION_CLOSEST bisa memakan waktu >100ms.
-                    Bitmap frame = retriever.getFrameAtTime(positionUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-                    if (frame != null) currentVideoBgFrame = frame;
-                } catch (Exception ignored) {
-                }
-                positionUs += frameIntervalUs;
-                if (positionUs >= durationUs) positionUs = 0;
-                
-                long elapsed = System.currentTimeMillis() - start;
-                long sleep = 33 - elapsed;
-                if (sleep > 0) {
-                    try {
-                        Thread.sleep(sleep);
-                    } catch (InterruptedException e) {
-                        break;
+        videoBgDecoder = new VideoTextureDecoder(context, backgroundVideoUri, designWidth, designHeight,
+                bitmap -> {
+                    synchronized (videoBgLock) {
+                        currentVideoBgFrame = bitmap;
                     }
-                }
-            }
-            try {
-                retriever.release();
-            } catch (Exception ignored) {
-            }
-        }, "CompositeScene-videoBg");
-        videoBgThread.start();
+                });
+        videoBgDecoder.start();
     }
 
     private void startCompositeDrawLoop() {
         drawThread = new Thread(() -> {
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
             long lastLog = 0L;
-            long frameTimeMs = 33; // ~30fps
+
+            // FIX PACING: sebelumnya frameTimeMs di-hardcode 33ms (30fps) dan sleep dihitung
+            // dari "elapsed sejak awal loop ini saja" - errornya tidak dikompensasi, jadi makin
+            // lama makin ngaco (drift menumpuk). Sekarang pakai jadwal absolut berbasis
+            // nanoTime yang mengikuti fps ASLI dari encoder (targetFps, diisi di create()),
+            // dan kalau sempat telat jauh (misal abis GC pause panjang) jadwal di-reset -
+            // bukan coba "kejar ketinggalan" dengan beruntun render tanpa sleep sama sekali
+            // (yang justru bikin makin patah-patah / thermal throttle).
+            long frameIntervalNs = 1_000_000_000L / Math.max(1, targetFps);
+            long nextFrameTimeNs = System.nanoTime();
+
             while (running && targetSurface != null && targetSurface.isValid()) {
-                long startTime = System.currentTimeMillis();
+                long now = System.nanoTime();
+                if (now < nextFrameTimeNs) {
+                    long sleepNs = nextFrameTimeNs - now;
+                    try {
+                        Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+
                 Canvas canvas = null;
                 try {
                     canvas = targetSurface.lockCanvas(null);
@@ -369,11 +376,11 @@ public class CompositeSceneVideoSource extends VideoSource {
 
                         canvas.restore();
 
-                        long now = System.currentTimeMillis();
-                        if (now - lastLog > 5000) {
-                            lastLog = now;
+                        long logNow = System.currentTimeMillis();
+                        if (logNow - lastLog > 5000) {
+                            lastLog = logNow;
                             Log.d(TAG, "drawLoop: Rendered " + designWidth + "x" + designHeight +
-                                    " into Canvas " + cW + "x" + cH);
+                                    " into Canvas " + cW + "x" + cH + " @" + targetFps + "fps");
                         }
                     }
                 } finally {
@@ -381,15 +388,13 @@ public class CompositeSceneVideoSource extends VideoSource {
                         targetSurface.unlockCanvasAndPost(canvas);
                     }
                 }
-                
-                long elapsed = System.currentTimeMillis() - startTime;
-                long sleep = frameTimeMs - elapsed;
-                if (sleep > 0) {
-                    try {
-                        Thread.sleep(sleep);
-                    } catch (InterruptedException e) {
-                        break;
-                    }
+
+                nextFrameTimeNs += frameIntervalNs;
+                long lagNs = System.nanoTime() - nextFrameTimeNs;
+                if (lagNs > frameIntervalNs) {
+                    // Ketinggalan lebih dari 1 frame penuh (stall/GC pause panjang) - reset
+                    // jadwal daripada burst-render tanpa jeda untuk "kejar ketinggalan".
+                    nextFrameTimeNs = System.nanoTime();
                 }
             }
         }, "CompositeScene-draw");
@@ -409,8 +414,13 @@ public class CompositeSceneVideoSource extends VideoSource {
     private void drawBackground(Canvas canvas, Paint paint, int cW, int cH) {
         canvas.drawColor(Color.BLACK);
         Bitmap bg = null;
-        if (backgroundType == BackgroundType.IMAGE) bg = backgroundImage;
-        else if (backgroundType == BackgroundType.VIDEO) bg = currentVideoBgFrame;
+        if (backgroundType == BackgroundType.IMAGE) {
+            bg = backgroundImage;
+        } else if (backgroundType == BackgroundType.VIDEO) {
+            synchronized (videoBgLock) {
+                bg = currentVideoBgFrame;
+            }
+        }
         if (bg != null) {
             Rect dst = fillRect(bg.getWidth(), bg.getHeight(), cW, cH);
             canvas.drawBitmap(bg, null, dst, paint);
