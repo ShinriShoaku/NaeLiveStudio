@@ -1,0 +1,19 @@
+<resources>
+    <string name="app_name">NL Studio</string>
+    <string-array name="encoder_types">
+        <item>Hardware (Auto)</item>
+        <item>Software (x264)</item>
+    </string-array>
+    <string name="resolution_title">Resolusi Deteksi</string>
+    <string name="fps_title">Frame Per Second (FPS)</string>
+    <string name="btn_live2d_desktop">Open Live2D Desktop</string>
+    <string name="label_resolution">Resolusi:</string>
+    <string name="label_fps">FPS:</string>
+    <string name="label_video_bitrate">Video Bitrate (kbps):</string>
+    <string name="hint_video_bitrate">contoh: 2500</string>
+    <string name="label_audio_bitrate">Audio Bitrate (kbps):</string>
+    <string name="hint_audio_bitrate">contoh: 128</string>
+    <string name="label_audio_source">Sumber Suara:</string>
+    <string name="btn_test_record">🎥 TEST</string>
+    <string name="layer_note">Belum ada layer. Tap Gambar/Video atau Teks di atas.</string>
+</resources>

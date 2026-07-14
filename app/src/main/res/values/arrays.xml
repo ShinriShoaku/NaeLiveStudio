@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="platform_names">
+        <item>TikTok</item>
+        <item>YouTube</item>
+        <item>Facebook</item>
+        <item>Twitch</item>
+        <item>Instagram</item>
+        <item>Custom / Lainnya</item>
+    </string-array>
+
+    <!-- Prefix RTMP server tiap platform. Kosong ("") artinya user isi manual (untuk TikTok/Instagram
+         karena URL server-nya unik per akun/sesi, beda dengan YouTube/Facebook/Twitch yang tetap). -->
+    <string-array name="platform_server_urls">
+        <item></item>
+        <item>rtmp://a.rtmp.youtube.com/live2/</item>
+        <item>rtmps://live-api-s.facebook.com:443/rtmp/</item>
+        <item>rtmp://live.twitch.tv/app/</item>
+        <item></item>
+        <item></item>
+    </string-array>
+    <string-array name="tracking_mode_labels">
+        <item>Power Saver — hemat baterai (skip 30 frame)</item>
+        <item>Balanced — default (skip 15 frame)</item>
+        <item>Performance — paling responsif (skip 5 frame)</item>
+    </string-array>
+
+    <string-array name="resolution_options">
+        <item>Sesuai Layar (Native)</item>
+        <item>1280x720 (High)</item>
+        <item>640x480 (Standard)</item>
+        <item>320x240 (Fastest)</item>
+    </string-array>
+
+    <string-array name="fps_options">
+        <item>15 FPS</item>
+        <item>24 FPS</item>
+        <item>30 FPS</item>
+        <item>60 FPS</item>
+    </string-array>
+
+    <string-array name="audio_source_options">
+        <item>Internal + Mic (Gunakan Headset!)</item>
+        <item>Hanya Internal Audio</item>
+        <item>Hanya Microphone</item>
+        <item>Tanpa Suara (Muted)</item>
+        <item>Mixer Manual</item>
+    </string-array>
+
+    <string-array name="scene_options">
+        <item>🖥️ Layar Utama</item>
+        <item>🖼️ Gambar Statis</item>
+        <item>🎬 Video File</item>
+    </string-array>
+
+    <string-array name="root_layout_options">
+        <item>Sesuai Layar (Native)</item>
+        <item>Portrait 1080x1920 (Full)</item>
+        <item>Landscape 1920x1080 (Full)</item>
+        <item>Preset: Game di Tengah (Portrait)</item>
+    </string-array>
+</resources>

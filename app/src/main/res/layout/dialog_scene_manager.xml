@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="#1B1D22"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- ===================== KANVAS EDITOR ===================== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="KANVAS SCENE (tap layer buat pilih, geser badan = pindah, geser kotak hijau pojok = resize)"
+            android:textColor="#7FD8A6"
+            android:textStyle="bold"
+            android:textSize="11sp"
+            android:layout_marginBottom="8dp" />
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="380dp"
+            android:layout_marginBottom="10dp">
+
+            <ame.project.nlstudio.ui.SceneCanvasView
+                android:id="@+id/sceneCanvasView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_gravity="center" />
+        </FrameLayout>
+
+
+        <!-- ===================== TOOLBAR LAYER ===================== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="LAYER / OVERLAY"
+            android:textColor="#7FD8A6"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp">
+
+            <Button
+                android:id="@+id/btnAddLayer"
+                style="@style/SecondaryButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:textSize="11sp"
+                android:text="+ Gambar / Icon" />
+
+            <Button
+                android:id="@+id/btnDeleteSelectedLayer"
+                style="@style/SecondaryButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:textSize="11sp"
+                android:enabled="false"
+                android:alpha="0.4"
+                android:text="🗑 Hapus Layer Ini" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ===================== ROOT LAYOUT ===================== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="ROOT LAYOUT / RESOLUSI"
+            android:textColor="#7FD8A6"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:layout_marginBottom="8dp" />
+
+        <Spinner
+            android:id="@+id/spinnerRootLayout"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:backgroundTint="#FFFFFF"
+            android:layout_marginBottom="16dp" />
+
+        <Button
+            android:id="@+id/btnApplyRootPreset"
+            style="@style/SecondaryButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:textSize="11sp"
+            android:text="Terapkan Preset (misal: Game di Tengah)" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ===================== SIMPAN SCENE ===================== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="NAMA SCENE"
+            android:textColor="#7FD8A6"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:layout_marginBottom="8dp" />
+
+        <EditText
+            android:id="@+id/etNewSceneName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Nama scene, misal: BRB, Iklan, Intro"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="10dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp">
+
+            <Button
+                android:id="@+id/btnNewScene"
+                style="@style/SecondaryButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:textSize="12sp"
+                android:text="🆕 Scene Baru" />
+
+            <Button
+                android:id="@+id/btnSaveScene"
+                style="@style/PrimaryButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:textSize="12sp"
+                android:text="💾 Simpan &amp; Terapkan" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ===================== SCENE TERSIMPAN ===================== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SCENE TERSIMPAN (tap = edit + langsung live)"
+            android:textColor="#7FD8A6"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:layout_marginBottom="8dp" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvSceneList"
+            android:layout_width="match_parent"
+            android:layout_height="180dp"
+            android:clipToPadding="false" />
+
+    </LinearLayout>
+</ScrollView>

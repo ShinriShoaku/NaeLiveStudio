@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simpan sebagai res/drawable/bg_layer_border_selected.xml -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#337FD8A6" />
+    <stroke
+        android:width="2dp"
+        android:color="#7FD8A6" />
+    <corners android:radius="4dp" />
+</shape>

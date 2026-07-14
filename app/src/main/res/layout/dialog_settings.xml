@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="#1B1D22"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- ===================== KARTU: KONEKSI ===================== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="KONEKSI"
+            android:textColor="#7FD8A6"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:layout_marginBottom="10dp" />
+
+        <TextView style="@style/LabelText" android:text="Platform" />
+        <Spinner
+            android:id="@+id/spinnerPlatform"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:entries="@array/platform_names"
+            android:layout_marginBottom="12dp" />
+
+        <TextView style="@style/LabelText" android:text="RTMP Server URL" />
+        <EditText
+            android:id="@+id/etServerUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="rtmp://server-kamu/live/"
+            android:inputType="textUri"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <TextView style="@style/LabelText" android:text="Stream Key" />
+        <EditText
+            android:id="@+id/etStreamKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="stream key dari dashboard platform"
+            android:inputType="textPassword"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="6dp" />
+
+        <TextView
+            android:id="@+id/tvFullUrlPreview"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:textColor="#7A7F87"
+            android:textSize="11sp"
+            android:layout_marginBottom="20dp" />
+
+        <!-- ===================== KARTU: KUALITAS ===================== -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="KUALITAS VIDEO"
+            android:textColor="#7FD8A6"
+            android:textStyle="bold"
+            android:textSize="12sp"
+            android:layout_marginBottom="10dp" />
+
+        <TextView style="@style/LabelText" android:text="@string/label_resolution" />
+        <Spinner
+            android:id="@+id/spinnerResolution"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:entries="@array/resolution_options"
+            android:layout_marginBottom="12dp" />
+
+        <TextView style="@style/LabelText" android:text="@string/label_fps" />
+        <Spinner
+            android:id="@+id/spinnerFps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:entries="@array/fps_options"
+            android:layout_marginBottom="12dp" />
+
+        <TextView style="@style/LabelText" android:text="@string/label_video_bitrate" />
+        <EditText
+            android:id="@+id/etVideoBitrate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_video_bitrate"
+            android:inputType="number"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <TextView style="@style/LabelText" android:text="@string/label_audio_bitrate" />
+        <EditText
+            android:id="@+id/etAudioBitrate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_audio_bitrate"
+            android:inputType="number"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <TextView style="@style/LabelText" android:text="Encoder Type" />
+        <Spinner
+            android:id="@+id/spinnerEncoderType"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:entries="@array/encoder_types"
+            android:layout_marginBottom="12dp" />
+
+        <TextView style="@style/LabelText"
+            android:text="Tangkap audio dari" />
+        <Spinner
+            android:id="@+id/spinnerGameAudioApp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Semua Audio Sistem = tangkap semua suara HP. Pilih 1 aplikasi/game untuk tangkap suara aplikasi itu saja."
+            android:textColor="#7A7F87"
+            android:textSize="11sp" />
+
+    </LinearLayout>
+</ScrollView>

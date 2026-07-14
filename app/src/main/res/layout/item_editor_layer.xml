@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simpan sebagai res/layout/item_editor_layer.xml -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/layerChipRoot"
+    android:layout_width="64dp"
+    android:layout_height="64dp"
+    android:layout_marginEnd="8dp"
+    android:padding="3dp"
+    android:background="@drawable/bg_layer_border">
+
+    <ImageView
+        android:id="@+id/ivLayerThumb"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:background="#000000"
+        android:contentDescription="Layer preview" />
+
+    <ImageView
+        android:id="@+id/ivLayerTypeBadge"
+        android:layout_width="16dp"
+        android:layout_height="16dp"
+        android:layout_gravity="top|start"
+        android:background="#B0000000"
+        android:padding="2dp"
+        app:tint="#7FD8A6"
+        android:visibility="gone"
+        android:contentDescription="Tipe layer" />
+
+    <ImageView
+        android:id="@+id/ivLayerDelete"
+        android:layout_width="18dp"
+        android:layout_height="18dp"
+        android:layout_gravity="top|end"
+        android:background="#CC1B1D22"
+        android:padding="2dp"
+        android:src="@android:drawable/ic_menu_delete"
+        app:tint="#FF6B6B"
+        android:visibility="gone"
+        android:contentDescription="Hapus layer" />
+
+</FrameLayout>

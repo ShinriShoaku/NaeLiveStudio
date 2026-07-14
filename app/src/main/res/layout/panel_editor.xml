@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="12dp">
+
+        <!-- ===================== TOOLBAR: Background / Tambah / Teks ===================== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:background="@drawable/bg_scene_card"
+            android:padding="10dp">
+
+            <LinearLayout
+                android:id="@+id/toolBgPicker"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnBgPicker"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/ic_menu_slideshow"
+                    android:padding="10dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Ganti background" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Background"
+                    android:textColor="#AAA"
+                    android:textSize="10sp"
+                    android:layout_marginTop="2dp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/toolAddLayer"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddImage"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/ic_menu_gallery"
+                    android:padding="10dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah layer gambar/video" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Gambar/Video"
+                    android:textColor="#AAA"
+                    android:textSize="10sp"
+                    android:layout_marginTop="2dp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/toolAddText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddText"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/ic_menu_edit"
+                    android:padding="10dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah layer teks" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Teks"
+                    android:textColor="#AAA"
+                    android:textSize="10sp"
+                    android:layout_marginTop="2dp" />
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- ===================== LAYER STRIP: klik utk pilih, X utk hapus ===================== -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="14dp"
+            android:gravity="center_vertical">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="LAYERS"
+                android:textColor="#7FD8A6"
+                android:textStyle="bold"
+                android:textSize="11sp" />
+            <TextView
+                android:id="@+id/tvLayerCount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="end"
+                android:text="0 layer"
+                android:textColor="#666"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvLayerStrip"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="64dp"
+            android:layout_marginTop="8dp"
+            android:clipToPadding="false"
+            android:orientation="horizontal" />
+
+        <TextView
+            android:id="@+id/tvNoLayersHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/layer_note"
+            android:textColor="#555"
+            android:textSize="11sp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
+        <!-- ===================== KONTEKSTUAL: Video Controls (background/layer video) ===================== -->
+        <LinearLayout
+            android:id="@+id/layoutVideoControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="14dp"
+            android:padding="10dp"
+            android:background="@drawable/bg_scene_card"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="VIDEO CONTROLS"
+                android:textColor="#7FD8A6"
+                android:textStyle="bold"
+                android:textSize="11sp"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <ImageButton
+                    android:id="@+id/btnPlayVideo"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="?attr/selectableItemBackgroundBorderless"
+                    android:src="@android:drawable/ic_media_pause"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Play/pause video" />
+
+                <SeekBar
+                    android:id="@+id/seekVideoProgress"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="1000" />
+
+                <CheckBox
+                    android:id="@+id/cbLoopVideo"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Loop"
+                    android:textColor="#FFF"
+                    android:textSize="12sp"
+                    android:checked="true"
+                    android:buttonTint="#7FD8A6" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- ===================== SIMPAN ===================== -->
+        <Button
+            android:id="@+id/btnSaveScene"
+            style="@style/PrimaryButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="💾 SIMPAN SCENE INI" />
+
+    </LinearLayout>
+</ScrollView>
