@@ -22,6 +22,8 @@ import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import androidx.recyclerview.widget.RecyclerView
@@ -56,6 +58,11 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "RES-MAIN"
+
+        // FIX STARTUP JANK: jeda tambahan setelah frame pertama ter-render sebelum mulai
+        // prefetch video di background, supaya tidak berebut CPU/GPU dengan initial layout &
+        // rendering (lihat prefetchAllVideoScenes()).
+        private const val PREFETCH_START_DELAY_MS = 500L
     }
 
     private lateinit var tvStatus: TextView
@@ -350,7 +357,7 @@ class MainActivity : AppCompatActivity() {
         // Load initial scene to canvas
         val initialScene = scenes.find { it.id == activeSceneId } ?: scenes.firstOrNull()
         initialScene?.let { switchToScene(it, updateService = savedInstanceState == null) }
-        
+
         // Prefetch SEMUA video background di background agar siap saat dibutuhkan
         prefetchAllVideoScenes()
 
@@ -379,11 +386,13 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         val filter = IntentFilter(StreamService.ACTION_STATUS_BROADCAST)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(statusReceiver, filter)
-        }
+
+        ContextCompat.registerReceiver(
+            this,
+            statusReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onStop() {
@@ -766,7 +775,7 @@ class MainActivity : AppCompatActivity() {
         editingLayers.clear()
         val gameHeight = rootW * 9f / 16f
         val hRatio = gameHeight / rootH
-        
+
         val yRatio = when(position) {
             "top" -> 0f
             "bottom" -> (rootH - gameHeight) / rootH
@@ -784,7 +793,7 @@ class MainActivity : AppCompatActivity() {
             zIndex = 0
         )
         editingLayers.add(gameLayer)
-        
+
         val label = when(position) {
             "top" -> "Game Atas"
             "bottom" -> "Game Bawah"
@@ -792,10 +801,10 @@ class MainActivity : AppCompatActivity() {
         }
         etNewSceneName.setText("Preset $label")
         dialogSceneManagerView.findViewById<Button>(R.id.btnApplyRootPreset)?.text = "Terapkan: $label"
-        
+
         refreshCanvasAspectRatio()
         refreshCanvasLayers()
-        
+
         // Simpan otomatis ke daftar scene dan terapkan ke main activity
         saveCurrentEditingScene()
     }
@@ -834,7 +843,7 @@ class MainActivity : AppCompatActivity() {
 
         refreshCanvasAspectRatio()
         refreshCanvasLayers()
-        
+
         // Simpan otomatis ke daftar scene dan terapkan ke main activity
         saveCurrentEditingScene()
     }
@@ -862,9 +871,9 @@ class MainActivity : AppCompatActivity() {
             // Jika sedang LIVE/Record, jangan putar otomatis di editor saat pindah scene biar CPU enteng.
             // User masih tetap bisa klik tombol Play secara manual kalau mau cek.
             val autoPlay = !StreamService.isServiceRunning
-            
+
             sceneCanvasView.setBackgroundVideo(uri, loop = loop, autoPlay = autoPlay)
-            
+
             isEmptyHint?.visibility = View.GONE
             if (autoPlay) {
                 btnPlayVideo?.setImageResource(android.R.drawable.ic_media_pause)
@@ -1121,7 +1130,7 @@ class MainActivity : AppCompatActivity() {
             stopService(Intent(this, StreamService::class.java))
             tvStatus.text = "Status: stopped"
             // Setelah stop, preview video di editor bisa jalan lagi
-            StreamService.isServiceRunning = false 
+            StreamService.isServiceRunning = false
             refreshCanvasBackground()
         }
 
@@ -1204,20 +1213,85 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Prefetch SEMUA video background scene ke cache, supaya siap saat scene itu dipilih nanti
+     * (lihat VideoCacheManager). PENTING - dulu semua scene ditembak PARALEL sekaligus di sini,
+     * yang di device kelas bawah (mis. MediaTek MT6765/PowerVR) menyebabkan:
+     *   - N buah HandlerThread + EGL context + MediaCodec dibuat SERENTAK -> GPU driver PowerVR
+     *     kewalahan (PVRSRVBridgeCall error), hardware AVC decoder (c2.mtk.avc.decoder) yang
+     *     cuma sanggup 1(-2) instance bersamaan jadi flush/discard-loop ratusan kali sampai nyerah.
+     *   - Kontensi CPU dari semburan thread itu menyekik main thread -> "Skipped N frames" /
+     *     "Davey!" durasi >1 detik pas startup.
+     *
+     * Fix: (1) ditunda dikit sampai frame pertama selesai render (view.post + delay kecil),
+     * dan (2) di-SERIALKAN - satu video di-cache sampai tuntas (pakai onComplete callback yang
+     * sudah ada di VideoCacheManager) baru lanjut ke video berikutnya, jadi cuma ada SATU decoder
+     * hardware yang aktif dalam satu waktu, bukan N sekaligus. Scene yang SEDANG aktif/dibuka di
+     * editor dilewati dulu (kalau video) karena sceneCanvasView kemungkinan sudah memutar videonya
+     * sendiri secara live untuk preview - tidak perlu decode dua kali secara bersamaan.
+     */
     private fun prefetchAllVideoScenes() {
-        scenes.forEach { scene ->
-            if (scene.backgroundType == BackgroundType.VIDEO && scene.backgroundUri != null) {
-                VideoCacheManager.getInstance().prefetch(this, Uri.parse(scene.backgroundUri),
-                    scene.rootWidth, scene.rootHeight, 30, 250L * 1024 * 1024, null)
-            }
+        val videoScenes = scenes.filter {
+            it.backgroundType == BackgroundType.VIDEO && it.backgroundUri != null && it.id != activeSceneId
         }
+        if (videoScenes.isEmpty()) return
+
+        // FIX KONTENSI DECODER TAMBAHAN: kalau scene yang lagi aktif/dibuka di editor itu SENDIRI
+        // video, SceneCanvasView.setBackgroundVideo() sudah bikin MediaPlayer-nya sendiri buat
+        // preview (autoplay, lihat refreshCanvasBackground()) - itu decoder hardware KETIGA
+        // (di luar VideoTextureDecoder yang dipakai VideoCacheManager & StreamService) yang bisa
+        // rebutan slot codec yang sama. Kasih jeda ekstra di kasus ini biar MediaPlayer preview-nya
+        // "settle" (selesai prepare + mulai main) dulu, baru prefetch video scene LAIN mulai jalan -
+        // supaya tidak ada 2 decoder video nyalain bersamaan pas boot.
+        val activeScene = scenes.find { it.id == activeSceneId }
+        val extraDelayMs = if (activeScene?.backgroundType == BackgroundType.VIDEO) 1500L else 0L
+
+        // Tunggu minimal satu siklus layout/draw pertama kelar, ditambah jeda kecil, sebelum
+        // mulai kerja background - supaya tidak numpuk di frame yang sama dengan initial render.
+        sceneCanvasView.post {
+            Handler(Looper.getMainLooper()).postDelayed({
+                prefetchVideoScenesSequentially(videoScenes, 0)
+            }, PREFETCH_START_DELAY_MS + extraDelayMs)
+        }
+    }
+
+    private fun prefetchVideoScenesSequentially(videoScenes: List<Scene>, index: Int) {
+        if (index >= videoScenes.size) {
+            Log.d(TAG, "prefetchVideoScenesSequentially: selesai (${videoScenes.size} scene diproses)")
+            return
+        }
+
+        val scene = videoScenes[index]
+        val uri = Uri.parse(scene.backgroundUri)
+
+        if (VideoCacheManager.getInstance().isCached(uri)) {
+            // Sudah ke-cache sebelumnya (mis. URI yang sama dipakai >1 scene) - lewati.
+            prefetchVideoScenesSequentially(videoScenes, index + 1)
+            return
+        }
+
+        Log.d(TAG, "prefetchVideoScenesSequentially: mulai scene='${scene.name}' (${index + 1}/${videoScenes.size})")
+
+        VideoCacheManager.getInstance().prefetch(
+            this, uri, scene.rootWidth, scene.rootHeight, 30, 250L * 1024 * 1024,
+            object : VideoCacheManager.ProgressListener {
+                override fun onProgress(frames: Int) {}
+                override fun onComplete() {
+                    // onComplete bisa dipanggil dari thread decoder internal, bukan main thread -
+                    // lompat balik ke main thread cuma untuk lanjut ke item berikutnya (murah/aman).
+                    Handler(Looper.getMainLooper()).post {
+                        prefetchVideoScenesSequentially(videoScenes, index + 1)
+                    }
+                }
+            }
+        )
     }
 
     private fun startPreCachingAllNecessary(onComplete: () -> Unit) {
         val scenesToCache = scenes.filter {
             it.backgroundType == BackgroundType.VIDEO &&
-            it.backgroundUri != null &&
-            !VideoCacheManager.getInstance().isCached(Uri.parse(it.backgroundUri))
+                    it.backgroundUri != null &&
+                    !VideoCacheManager.getInstance().isCached(Uri.parse(it.backgroundUri))
         }
 
         if (scenesToCache.isEmpty()) {
@@ -1236,7 +1310,7 @@ class MainActivity : AppCompatActivity() {
             .show()
 
         var currentIdx = 0
-        
+
         fun cacheNext() {
             if (currentIdx >= scenesToCache.size) {
                 runOnUiThread {
@@ -1249,7 +1323,7 @@ class MainActivity : AppCompatActivity() {
             val scene = scenesToCache[currentIdx]
             val p = collectStreamParams()
             val sceneName = scene.name
-            
+
             runOnUiThread {
                 tvProgress.text = "Caching scene ($sceneName) - ${currentIdx + 1}/${scenesToCache.size}"
                 progressBar.progress = (currentIdx * 100 / scenesToCache.size)
