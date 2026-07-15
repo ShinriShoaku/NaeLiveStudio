@@ -28,6 +28,13 @@ public class VideoCacheManager {
     private final Map<String, VideoTextureDecoder> prefetchers = new ConcurrentHashMap<>();
     private final Map<String, ProgressListener> listeners = new ConcurrentHashMap<>();
 
+    // FIX OOM: sebelumnya memoryBudget dicek PER-URI saja - kalau user punya banyak scene dengan
+    // video background berbeda-beda, tiap-tiap cache bisa penuh sampai budgetnya sendiri (mis.
+    // 250MB), dan totalnya lintas semua URI bisa jauh melebihi RAM yang tersedia di device tanpa
+    // ada yang mencegah. Sekarang ada batas TOTAL gabungan semua cache di singleton ini.
+    private static final long TOTAL_CACHE_BUDGET_BYTES = 400L * 1024 * 1024; // ~400MB gabungan
+    private final java.util.concurrent.atomic.AtomicLong totalCachedBytes = new java.util.concurrent.atomic.AtomicLong(0);
+
     private VideoCacheManager() {}
 
     public static synchronized VideoCacheManager getInstance() {
@@ -48,7 +55,7 @@ public class VideoCacheManager {
             return;
         }
         String key = uri.toString();
-        
+
         // Jika sudah ada cache lengkap, langsung panggil onComplete
         if (isCached(uri)) {
             if (listener != null) listener.onComplete();
@@ -56,25 +63,32 @@ public class VideoCacheManager {
         }
 
         if (listener != null) listeners.put(key, listener);
-        
+
         // Jika sedang berjalan, biarkan saja (listener sudah didaftarkan)
         if (prefetchers.containsKey(key)) return;
 
         Log.d(TAG, "Mulai prefetch: " + key);
         List<Bitmap> frames = Collections.synchronizedList(new ArrayList<>());
-        
+
         VideoTextureDecoder decoder = new VideoTextureDecoder(context, uri, w, h, false, new VideoTextureDecoder.Listener() {
             @Override
             public void onFrame(Bitmap bitmap) {
                 int frameSize = w * h * 2; // RGB_565
                 if ((long) (frames.size() + 1) * frameSize > memoryBudget) {
-                    Log.d(TAG, "Budget penuh untuk " + key + ", berhenti prefetch");
+                    Log.d(TAG, "Budget per-URI penuh untuk " + key + ", berhenti prefetch");
+                    stopAndFinalize(key);
+                    return;
+                }
+                if (totalCachedBytes.get() + frameSize > TOTAL_CACHE_BUDGET_BYTES) {
+                    Log.d(TAG, "Budget TOTAL gabungan semua scene penuh (" + totalCachedBytes.get()
+                            + " bytes), berhenti prefetch utk " + key);
                     stopAndFinalize(key);
                     return;
                 }
                 Bitmap copy = bitmap.copy(Bitmap.Config.RGB_565, false);
                 if (copy != null) {
                     frames.add(copy);
+                    totalCachedBytes.addAndGet(frameSize);
                     ProgressListener l = listeners.get(key);
                     if (l != null) l.onProgress(frames.size());
                 }
@@ -118,5 +132,6 @@ public class VideoCacheManager {
             for (Bitmap b : list) b.recycle();
         }
         cacheMap.clear();
+        totalCachedBytes.set(0);
     }
 }

@@ -24,40 +24,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 
-/**
- * Decode video file secara TERUS-MENERUS (streaming), BUKAN seek-per-frame seperti
- * MediaMetadataRetriever.getFrameAtTime().
- *
- * Alurnya: MediaExtractor + MediaCodec (VIDEO TRACK SAJA) -> SurfaceTexture (GL_TEXTURE_EXTERNAL_OES)
- * -> render ke FBO offscreen -> glReadPixels -> Bitmap. Semua kerja GL/EGL jalan di HandlerThread
- * miliknya sendiri, dipicu oleh SurfaceTexture.OnFrameAvailableListener (bukan Thread.sleep
- * polling), jadi frame baru cuma diproses saat memang ada frame baru dari decoder hardware.
- *
- * KENAPA MediaExtractor+MediaCodec MANUAL, BUKAN MediaPlayer (versi sebelumnya):
- * MediaPlayer otomatis handle audio+video sekaligus - walau di-setVolume(0,0) supaya senyap,
- * audio track-nya TETAP didecode dan tetap punya audio session aktif di sistem. Audio session
- * yang masih aktif itu bisa "bocor" ke fitur internal-audio-capture (mis. AudioMixSource /
- * capture audio sistem lewat MediaProjection yang dipakai StreamService) walau device speaker
- * sendiri diam - itu penyebab suara dari fake scene video ikut kerekam padahal sudah "di-mute".
- * Solusinya bukan senyapin volume, tapi jangan pernah sentuh audio track-nya sama sekali:
- * MediaExtractor di sini cuma men-select TRACK VIDEO (lihat setupExtractorAndCodec()), audio
- * track di file itu tidak pernah dipilih/didecode/dibuka session-nya - jadi memang tidak ada
- * audio apapun yang bisa dikapture siapapun, bukan sekadar "disenyapin".
- *
- * Loop video (kalau loop=true) dilakukan dengan extractor.seekTo(0) + codec.flush() saat EOS -
- * SATU decoder yang di-reset, bukan bongkar-pasang objek MediaCodec baru tiap kali video habis
- * (flush+seek itu operasi cepat karena codec-nya sudah "panas"/siap).
- *
- * Kenapa ini jauh lebih smooth dibanding MediaMetadataRetriever:
- * - Tidak ada seek + redecode-dari-keyframe-terdekat tiap kali minta frame (itu yang bikin
- *   MediaMetadataRetriever bisa >100ms per panggilan dan menyebabkan patah-patah).
- * - Decoder hardware push frame secara alami sesuai frame rate video aslinya (dipacing manual
- *   berbasis presentationTimeUs di decodeLoop()).
- * - Pakai double-buffer Bitmap (outputBitmaps[0]/[1]) supaya thread yang MEMBACA hasil frame
- *   (composite draw thread / cache prefetch) tidak pernah membaca Bitmap yang sedang ditulis
- *   ulang isinya (mencegah tearing), tanpa perlu alokasi Bitmap baru tiap frame (mengurangi
- *   tekanan GC).
- */
+
 public class VideoTextureDecoder {
 
     public interface Listener {
@@ -306,7 +273,19 @@ public class VideoTextureDecoder {
                 int outIndex = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US);
                 if (outIndex >= 0) {
                     boolean render = info.size > 0;
-                    if (render) {
+                    // FIX DELAY SAAT GANTI SCENE: pacing ke presentationTimeUs HANYA perlu untuk
+                    // mode loop=true (live-streaming, frame ditampilkan LANGSUNG ke penonton -
+                    // harus jalan sesuai kecepatan video aslinya). Mode loop=false SELALU dipakai
+                    // untuk PREFETCH/CACHE SEKALI JALAN (lihat VideoCacheManager, dan
+                    // startVideoBackgroundLoop()/startVideoPlayback() di Composite/FakeSceneVideoSource)
+                    // - di situ hasil decode cuma disimpan ke array Bitmap RAM, TIDAK ditonton
+                    // langsung, jadi pacing di sini cuma buang-buang waktu. Sebelumnya baris di
+                    // bawah ini jalan utk KEDUA mode, akibatnya nge-cache video durasi 10 detik
+                    // makan waktu ~10 detik juga (secepat playback aslinya) - padahal decoder
+                    // hardware sanggup jauh lebih cepat. Ini penyebab video "freeze"/tidak jalan
+                    // beberapa detik pas ganti scene: selama itu prefetch masih realtime-pacing.
+                    // Sekarang kalau loop=false, decode FLAT OUT secepat mungkin.
+                    if (render && loop) {
                         if (startTimeNs < 0) {
                             startTimeNs = System.nanoTime() - info.presentationTimeUs * 1000L;
                         }

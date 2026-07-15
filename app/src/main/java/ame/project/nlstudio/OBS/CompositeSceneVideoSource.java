@@ -37,7 +37,7 @@ import ame.project.nlstudio.scene.LayerType;
  * Fix: Menggunakan ukuran Canvas asli untuk menggambar agar Full Scale dan menangani
  * aspek rasio screen capture agar tidak gepeng atau muncul bar hitam yang tidak diinginkan.
  */
-public class CompositeSceneVideoSource extends VideoSource {
+public class CompositeSceneVideoSource extends VideoSource implements SceneCrossfadeSupport {
 
     private static final String TAG = "RES-COMP";
 
@@ -109,6 +109,26 @@ public class CompositeSceneVideoSource extends VideoSource {
     // di-scale kecil & di-tengah-in (letterbox) oleh GL renderer punya library.
     private int encoderWidth = 0;
     private int encoderHeight = 0;
+
+    // ---- Crossfade transisi scene (sama seperti FakeSceneVideoSource, lihat komentar di sana) ----
+    private static final long FADE_DURATION_NS = 350_000_000L; // 350ms
+    private volatile Bitmap fadeFromSnapshot;
+    private long fadeStartNs = -1L;
+    private Bitmap frameBuffer;
+    private final Object frameBufferLock = new Object();
+
+    /** Dipanggil StreamService SEBELUM start(), mewariskan frame terakhir scene sebelumnya. */
+    public void setFadeFromSnapshot(Bitmap snapshot) {
+        this.fadeFromSnapshot = snapshot;
+    }
+
+    /** Salinan frame yang sedang tampil sekarang, dipakai sebagai bahan fade-out scene berikutnya. */
+    public Bitmap peekCurrentFrame() {
+        synchronized (frameBufferLock) {
+            if (frameBuffer == null || frameBuffer.isRecycled()) return null;
+            return frameBuffer.copy(frameBuffer.getConfig(), false);
+        }
+    }
 
     public CompositeSceneVideoSource(Context context, BackgroundType backgroundType,
                                      Bitmap backgroundImage, Uri backgroundVideoUri,
@@ -314,6 +334,15 @@ public class CompositeSceneVideoSource extends VideoSource {
             targetSurface.release();
             targetSurface = null;
         }
+
+        synchronized (frameBufferLock) {
+            if (frameBuffer != null && !frameBuffer.isRecycled()) frameBuffer.recycle();
+            frameBuffer = null;
+        }
+        if (fadeFromSnapshot != null && !fadeFromSnapshot.isRecycled()) {
+            fadeFromSnapshot.recycle();
+        }
+        fadeFromSnapshot = null;
     }
 
     @Override
@@ -436,11 +465,12 @@ public class CompositeSceneVideoSource extends VideoSource {
     private void startCompositeDrawLoop() {
         drawThread = new Thread(() -> {
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            Paint fadePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
             long lastLog = 0L;
-            int cachedFrameIndex = 0;
 
             long frameIntervalNs = 1_000_000_000L / Math.max(1, targetFps);
             long nextFrameTimeNs = System.nanoTime();
+            fadeStartNs = fadeFromSnapshot != null ? System.nanoTime() : -1L;
 
             while (running) {
                 Surface surface = targetSurface;
@@ -469,25 +499,47 @@ public class CompositeSceneVideoSource extends VideoSource {
                 // Cek lagi setelah sleep
                 if (!running || surface != targetSurface || !surface.isValid()) continue;
 
-                Canvas canvas = null;
+                Canvas surfaceCanvas = null;
                 try {
-                    canvas = surface.lockCanvas(null);
-                    if (canvas != null) {
-                        int cW = canvas.getWidth();
-                        int cH = canvas.getHeight();
+                    surfaceCanvas = surface.lockCanvas(null);
+                    if (surfaceCanvas != null) {
+                        int cW = surfaceCanvas.getWidth();
+                        int cH = surfaceCanvas.getHeight();
 
-                        canvas.save();
-                        canvas.scale((float) cW / designWidth, (float) cH / designHeight);
+                        synchronized (frameBufferLock) {
+                            if (frameBuffer == null || frameBuffer.getWidth() != cW || frameBuffer.getHeight() != cH) {
+                                if (frameBuffer != null && !frameBuffer.isRecycled()) frameBuffer.recycle();
+                                frameBuffer = Bitmap.createBitmap(cW, cH, Bitmap.Config.ARGB_8888);
+                            }
+                            Canvas bufCanvas = new Canvas(frameBuffer);
+                            bufCanvas.save();
+                            bufCanvas.scale((float) cW / designWidth, (float) cH / designHeight);
 
-                        // FIX: Gunakan satu lock untuk seluruh proses drawing agar tidak crash saat stop()
-                        synchronized (videoBgLock) {
-                            drawBackground(canvas, paint, designWidth, designHeight, cachedFrameIndex);
-                            drawLayers(canvas, paint, designWidth, designHeight);
+                            // FIX: Gunakan satu lock untuk seluruh proses drawing agar tidak crash saat stop()
+                            synchronized (videoBgLock) {
+                                drawBackground(bufCanvas, paint, designWidth, designHeight);
+                                drawLayers(bufCanvas, paint, designWidth, designHeight);
+                            }
+
+                            bufCanvas.restore();
+
+                            // Cross-dissolve dari snapshot scene sebelumnya (lihat FakeSceneVideoSource
+                            // untuk penjelasan lengkap kenapa ini dilakukan di titik ini).
+                            Bitmap fadeSnap = fadeFromSnapshot;
+                            if (fadeSnap != null && !fadeSnap.isRecycled() && fadeStartNs >= 0) {
+                                long elapsed = System.nanoTime() - fadeStartNs;
+                                if (elapsed >= FADE_DURATION_NS) {
+                                    fadeFromSnapshot = null;
+                                    fadeSnap.recycle();
+                                } else {
+                                    float t = 1f - ((float) elapsed / FADE_DURATION_NS);
+                                    fadePaint.setAlpha(Math.round(t * 255f));
+                                    bufCanvas.drawBitmap(fadeSnap, null, new Rect(0, 0, cW, cH), fadePaint);
+                                }
+                            }
+
+                            surfaceCanvas.drawBitmap(frameBuffer, 0, 0, null);
                         }
-
-                        canvas.restore();
-
-                        cachedFrameIndex++;
 
                         long logNow = System.currentTimeMillis();
                         if (logNow - lastLog > 5000) {
@@ -501,9 +553,9 @@ public class CompositeSceneVideoSource extends VideoSource {
                 } catch (Exception e) {
                     Log.e(TAG, "drawLoop: unexpected error during draw", e);
                 } finally {
-                    if (canvas != null) {
+                    if (surfaceCanvas != null) {
                         try {
-                            surface.unlockCanvasAndPost(canvas);
+                            surface.unlockCanvasAndPost(surfaceCanvas);
                         } catch (Exception e) {
                             Log.w(TAG, "drawLoop: error unlocking canvas", e);
                         }
@@ -531,7 +583,11 @@ public class CompositeSceneVideoSource extends VideoSource {
         return new Rect(left, top, left + w, top + h);
     }
 
-    private void drawBackground(Canvas canvas, Paint paint, int cW, int cH, int cachedFrameIndex) {
+    // Index frame video background, dikelola di sini (bukan lagi parameter dari draw-loop) supaya
+    // bisa lanjut mulus dari LOADING_CACHE -> CACHED tanpa lompatan (lihat drawBackground()).
+    private int bgFrameIndex = 0;
+
+    private void drawBackground(Canvas canvas, Paint paint, int cW, int cH) {
         canvas.drawColor(Color.BLACK);
         Bitmap bg = null;
         synchronized (videoBgLock) {
@@ -539,9 +595,20 @@ public class CompositeSceneVideoSource extends VideoSource {
                 bg = backgroundImage;
             } else if (backgroundType == BackgroundType.VIDEO) {
                 if (videoPlaybackState == VideoPlaybackState.CACHED && !cachedFrames.isEmpty()) {
-                    bg = cachedFrames.get(cachedFrameIndex % cachedFrames.size());
+                    bg = cachedFrames.get(bgFrameIndex % cachedFrames.size());
+                    bgFrameIndex++;
                 } else if (videoPlaybackState == VideoPlaybackState.LOADING_CACHE && !cachedFrames.isEmpty()) {
-                    bg = cachedFrames.get(0);
+                    // FIX: dulu freeze di frame pertama selama loading (kelihatan "berhenti").
+                    // Sekarang ikut jalan lewat frame yang SUDAH ke-decode sejauh ini (di-clamp,
+                    // tidak lompat ke frame yang belum ada) - dipacing draw-loop ini sendiri
+                    // (targetFps), jadi kelihatan main normal, bukan freeze. Begitu
+                    // videoPlaybackState pindah ke CACHED, bgFrameIndex sudah nyambung di posisi
+                    // yang sama - tidak ada lompatan/glitch saat transisi.
+                    int loadIdx = Math.min(bgFrameIndex, cachedFrames.size() - 1);
+                    bg = cachedFrames.get(loadIdx);
+                    if (bgFrameIndex < cachedFrames.size() - 1) {
+                        bgFrameIndex++;
+                    }
                 } else {
                     bg = currentVideoBgFrame;
                 }

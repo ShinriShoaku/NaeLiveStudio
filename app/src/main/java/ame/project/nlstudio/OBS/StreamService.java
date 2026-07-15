@@ -214,6 +214,20 @@ public class StreamService extends Service implements ConnectChecker {
 
     private AudioMixSource audioMixSource;
 
+    // FIX SMOOTHNESS: switchScene() dulu melakukan SEMUA kerja berat (parse JSON, decode
+    // bitmap, MediaMetadataRetriever, sampai changeVideoSource() yang stop()+start() source)
+    // langsung di onStartCommand() - yang SELALU jalan di MAIN THREAD (Service tidak dapat
+    // thread sendiri secara default). Itu penyebab utama UI "berat"/patah setiap ganti scene.
+    // Sekarang semua kerja berat itu dipindah ke single-thread executor ini, main thread cuma
+    // kebagian decode Intent extras (murah) + submit tugas. single-thread (bukan pool) supaya
+    // scene switch tetap diproses berurutan (tidak ada 2 switchScene() tumpang tindih).
+    private final java.util.concurrent.ExecutorService sceneSwitchExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
+
+    // Referensi video source scene yang lagi aktif SEKARANG, dipakai buat ambil "snapshot" frame
+    // terakhirnya sesaat sebelum diganti scene lain (bahan efek fade/cross-dissolve).
+    private volatile com.pedro.encoder.input.sources.video.VideoSource currentSceneSource;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -277,11 +291,11 @@ public class StreamService extends Service implements ConnectChecker {
                         width = rootW;
                         height = rootH;
                     }
-                    
+
                     // Trigger prefetch untuk video background jika ada
                     String bgUri = o.optString("backgroundUri", null);
                     if ("VIDEO".equals(o.optString("backgroundType")) && bgUri != null) {
-                        VideoCacheManager.getInstance().prefetch(this, Uri.parse(bgUri), 
+                        VideoCacheManager.getInstance().prefetch(this, Uri.parse(bgUri),
                                 width, height, fps, 250L * 1024 * 1024, null);
                     }
                 } catch (Exception e) {
@@ -399,15 +413,20 @@ public class StreamService extends Service implements ConnectChecker {
 
         applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
 
-        // Terapkan source video awal berdasarkan scene yang dipilih
+        // Terapkan source video awal berdasarkan scene yang dipilih. Belum ada scene aktif
+        // sebelumnya di titik ini, jadi tidak ada snapshot untuk fade (null = cut biasa).
         if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
             try {
-                applyCompositeScene(initialSceneJson);
+                applyCompositeScene(initialSceneJson, null);
             } catch (Exception e) {
-                rtmpStream.changeVideoSource(new ScreenSource(this, mediaProjection));
+                ScreenSource fallback = new ScreenSource(this, mediaProjection);
+                rtmpStream.changeVideoSource(fallback);
+                currentSceneSource = fallback;
             }
         } else {
-            rtmpStream.changeVideoSource(new ScreenSource(this, mediaProjection));
+            ScreenSource initial = new ScreenSource(this, mediaProjection);
+            rtmpStream.changeVideoSource(initial);
+            currentSceneSource = initial;
         }
 
         // FIX: Panggil properti GL SETELAH changeVideoSource agar tidak ter-reset
@@ -456,6 +475,20 @@ public class StreamService extends Service implements ConnectChecker {
     /**
      * Ganti video source on-the-fly. Screen recording tetap "siap" karena MediaProjection
      * disimpan (savedMediaProjection) - jadi balik ke scene Layar tidak minta izin lagi.
+     *
+     * FIX SMOOTHNESS: dulu SEMUA kerja di method ini (load bitmap dari URI, MediaMetadataRetriever
+     * per layer video, parse JSON scene, sampai changeVideoSource() yang stop()+start() source)
+     * dieksekusi LANGSUNG di sini - dan method ini selalu dipanggil dari onStartCommand(), yang
+     * SELALU jalan di MAIN THREAD (Service tidak otomatis dapat thread sendiri). Itu penyebab
+     * utama UI kerasa "berat"/patah setiap ganti scene: MediaMetadataRetriever saja bisa
+     * 50-300ms PER PANGGILAN, ditambah changeVideoSource() yang nge-join() thread lama sampai
+     * ~200-300ms - semua numpuk di main thread.
+     *
+     * Sekarang: bagian yang WAJIB tetap di caller thread (baca Intent extras - sudah dilakukan
+     * oleh pemanggil, dan ambil snapshot frame scene aktif - operasi cepat, lihat
+     * captureCurrentSceneSnapshot()) tetap sinkron. Sisanya (decode bitmap, retriever, JSON,
+     * bikin decoder, DAN changeVideoSource() itu sendiri) dipindah ke sceneSwitchExecutor
+     * (single background thread, urut - tidak akan ada 2 switch tumpang tindih).
      */
     private void switchScene(String scene, Uri uri, String sceneJson) {
         Log.d(TAG, "switchScene: scene=" + scene + " uri=" + uri
@@ -463,43 +496,80 @@ public class StreamService extends Service implements ConnectChecker {
                 + savedWidth + "x" + savedHeight);
         if (scene == null || savedMediaProjection == null) return;
 
-        try {
-            if (SCENE_SCREEN.equals(scene)) {
-                rtmpStream.changeVideoSource(new ScreenSource(this, savedMediaProjection));
-                updateInternalAudioMuteState(true);
+        // Snapshot frame terakhir dari scene yang MASIH aktif sekarang, diambil SEBELUM di-stop().
+        // Ini cuma satu kali bitmap copy (~beberapa ms), aman dilakukan di main thread.
+        final Bitmap fadeSnapshot = captureCurrentSceneSnapshot();
 
-            } else if (SCENE_COMPOSITE.equals(scene) && sceneJson != null) {
-                applyCompositeScene(sceneJson);
-
-            } else if (SCENE_IMAGE.equals(scene) && uri != null) {
-                Bitmap bitmap = loadBitmapFromUri(uri, savedWidth, savedHeight);
-                if (bitmap != null) {
-                    FakeSceneVideoSource source = new FakeSceneVideoSource(this, bitmap);
-                    source.setResolution(savedWidth, savedHeight);
+        sceneSwitchExecutor.execute(() -> {
+            try {
+                if (SCENE_SCREEN.equals(scene)) {
+                    ScreenSource source = new ScreenSource(this, savedMediaProjection);
+                    // ScreenSource bawaan RootEncoder tidak mendukung snapshot/fade (lihat
+                    // SceneCrossfadeSupport) - tetap "cut" langsung, tapi tidak lagi memblokir UI.
                     rtmpStream.changeVideoSource(source);
+                    currentSceneSource = source;
+                    updateInternalAudioMuteState(true);
+                    applyGlProperties();
+
+                } else if (SCENE_COMPOSITE.equals(scene) && sceneJson != null) {
+                    applyCompositeScene(sceneJson, fadeSnapshot);
+
+                } else if (SCENE_IMAGE.equals(scene) && uri != null) {
+                    Bitmap bitmap = loadBitmapFromUri(uri, savedWidth, savedHeight);
+                    if (bitmap != null) {
+                        FakeSceneVideoSource source = new FakeSceneVideoSource(this, bitmap);
+                        source.setResolution(savedWidth, savedHeight);
+                        source.setFadeFromSnapshot(fadeSnapshot);
+                        rtmpStream.changeVideoSource(source);
+                        currentSceneSource = source;
+                    } else if (fadeSnapshot != null) {
+                        fadeSnapshot.recycle();
+                    }
+                    updateInternalAudioMuteState(false);
+                    applyGlProperties();
+
+                } else if (SCENE_VIDEO.equals(scene) && uri != null) {
+                    FakeSceneVideoSource source = new FakeSceneVideoSource(this, uri);
+                    source.setResolution(savedWidth, savedHeight);
+                    source.setFadeFromSnapshot(fadeSnapshot);
+                    rtmpStream.changeVideoSource(source);
+                    currentSceneSource = source;
+                    updateInternalAudioMuteState(false);
+                    applyGlProperties();
+                } else if (fadeSnapshot != null) {
+                    fadeSnapshot.recycle();
                 }
-                updateInternalAudioMuteState(false);
 
-            } else if (SCENE_VIDEO.equals(scene) && uri != null) {
-                FakeSceneVideoSource source = new FakeSceneVideoSource(this, uri);
-                source.setResolution(savedWidth, savedHeight);
-                rtmpStream.changeVideoSource(source);
-                updateInternalAudioMuteState(false);
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal ganti scene", e);
+                if (fadeSnapshot != null && !fadeSnapshot.isRecycled()) fadeSnapshot.recycle();
+                handler.post(() -> Toast.makeText(this,
+                        "Gagal ganti scene: " + e.getMessage(), Toast.LENGTH_SHORT).show());
             }
+        });
+    }
 
-            applyGlProperties();
-
-        } catch (Exception e) {
-            Log.e(TAG, "Gagal ganti scene", e);
-            Toast.makeText(this, "Gagal ganti scene: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+    /** Ambil salinan frame terakhir dari source yang lagi aktif sekarang, kalau source itu
+     *  mendukung SceneCrossfadeSupport (Composite/Fake). Dipakai sebagai bahan cross-dissolve
+     *  buat scene BERIKUTNYA. Return null kalau tidak ada/tidak didukung - scene berikutnya
+     *  akan "cut" langsung seperti biasa, tidak ada error. */
+    private Bitmap captureCurrentSceneSnapshot() {
+        Object src = currentSceneSource;
+        if (src instanceof SceneCrossfadeSupport) {
+            try {
+                return ((SceneCrossfadeSupport) src).peekCurrentFrame();
+            } catch (Exception e) {
+                Log.w(TAG, "captureCurrentSceneSnapshot: gagal ambil snapshot, lanjut tanpa fade", e);
+            }
         }
+        return null;
     }
 
     /**
      * Parse JSON scene (background + layers) dari MainActivity, load semua bitmap yang dibutuhkan,
      * lalu render pakai CompositeSceneVideoSource. Ini jalur scene ala OBS yang baru.
      */
-    private void applyCompositeScene(String sceneJson) throws Exception {
+    private void applyCompositeScene(String sceneJson, Bitmap fadeSnapshot) throws Exception {
         JSONObject o = new JSONObject(sceneJson);
         String bgTypeStr = o.optString("backgroundType", "COLOR");
         String bgUriStr = o.isNull("backgroundUri") ? null : o.optString("backgroundUri", null);
@@ -586,7 +656,10 @@ public class StreamService extends Service implements ConnectChecker {
         CompositeSceneVideoSource source = new CompositeSceneVideoSource(
                 this, bgType, backgroundImage, backgroundVideoUri, layers, rootW, rootH);
         source.setMediaProjection(savedMediaProjection);
+        source.setFadeFromSnapshot(fadeSnapshot);
         rtmpStream.changeVideoSource(source);
+        currentSceneSource = source;
+        applyGlProperties();
         logResolutionGetters(rtmpStream, "rtmpStream setelah changeVideoSource(composite)");
         logGlInterfaceState("setelah changeVideoSource(composite)");
     }
@@ -700,12 +773,16 @@ public class StreamService extends Service implements ConnectChecker {
 
         if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
             try {
-                applyCompositeScene(initialSceneJson);
+                applyCompositeScene(initialSceneJson, null);
             } catch (Exception e) {
-                rtmpStream.changeVideoSource(new ScreenSource(this, mediaProjection));
+                ScreenSource fallback = new ScreenSource(this, mediaProjection);
+                rtmpStream.changeVideoSource(fallback);
+                currentSceneSource = fallback;
             }
         } else {
-            rtmpStream.changeVideoSource(new ScreenSource(this, mediaProjection));
+            ScreenSource initial = new ScreenSource(this, mediaProjection);
+            rtmpStream.changeVideoSource(initial);
+            currentSceneSource = initial;
         }
 
         applyGlProperties();
@@ -752,23 +829,23 @@ public class StreamService extends Service implements ConnectChecker {
 
             android.net.Uri uri = getContentResolver().insert(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
             if (uri != null) {
-            try (java.io.InputStream is = new java.io.FileInputStream(tempPath);
-                 java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
-                byte[] buffer = new byte[1024 * 1024];
-                int read;
-                while ((read = is.read(buffer)) != -1) {
-                    os.write(buffer, 0, read);
+                try (java.io.InputStream is = new java.io.FileInputStream(tempPath);
+                     java.io.OutputStream os = getContentResolver().openOutputStream(uri)) {
+                    byte[] buffer = new byte[1024 * 1024];
+                    int read;
+                    while ((read = is.read(buffer)) != -1) {
+                        os.write(buffer, 0, read);
+                    }
                 }
+                stopEverything("Rekaman Selesai & Tersimpan ke Gallery");
+                Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show();
             }
-            stopEverything("Rekaman Selesai & Tersimpan ke Gallery");
-            Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal export ke gallery", e);
+            stopEverything("Rekaman Selesai, Gagal Simpan ke Gallery");
+            Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
         }
-    } catch (Exception e) {
-        Log.e(TAG, "Gagal export ke gallery", e);
-        stopEverything("Rekaman Selesai, Gagal Simpan ke Gallery");
-        Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
     }
-}
 
     // ==================== HELPER BERSAMA ====================
 
@@ -887,6 +964,7 @@ public class StreamService extends Service implements ConnectChecker {
             audioMixSource.stop();
             audioMixSource = null;
         }
+        currentSceneSource = null;
         if (savedMediaProjection != null) {
             try {
                 savedMediaProjection.stop();
@@ -894,7 +972,7 @@ public class StreamService extends Service implements ConnectChecker {
             }
             savedMediaProjection = null;
         }
-        
+
         sendStatusBroadcast(finalMsg != null ? finalMsg : "Status: idle");
 
         stopForeground(true);
@@ -905,6 +983,7 @@ public class StreamService extends Service implements ConnectChecker {
     public void onDestroy() {
         stopEverything();
         isServiceRunning = false;
+        sceneSwitchExecutor.shutdownNow();
         super.onDestroy();
     }
 

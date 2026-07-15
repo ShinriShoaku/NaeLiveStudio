@@ -17,35 +17,7 @@ import com.pedro.encoder.input.sources.video.VideoSource;
 
 import java.util.concurrent.CopyOnWriteArrayList;
 
-/**
- * Fake scene / scene tambahan: menampilkan GAMBAR STATIS (looping) atau VIDEO FILE (looping)
- * ke Surface milik encoder.
- *
- * MODE VIDEO_FILE - STRATEGI CACHE FRAME (hemat CPU/GPU):
- * Karena video fake scene biasanya klip pendek yang di-loop TERUS-MENERUS selama live, decode
- * ulang tiap frame secara real-time itu boros CPU/GPU secara percuma - isi videonya kan sama
- * berulang-ulang. Jadi sekarang:
- *   1) Video di-decode SEKALI SAJA (non-loop) lewat VideoTextureDecoder, tiap frame hasilnya
- *      di-copy ke Bitmap RGB_565 (separuh memori dibanding ARGB_8888 - video tidak butuh alpha)
- *      dan disimpan di array di RAM.
- *   2) Setelah decode sekali itu selesai, decoder DIMATIKAN TOTAL. Sisa waktu live, draw-loop
- *      cuma GILIR Bitmap dari array itu (persis seperti mode STATIC_IMAGE, cuma gambarnya ganti-
- *      ganti tiap frame) - nyaris tidak ada beban CPU/GPU dibanding decode real-time terus-menerus.
- *
- * GUARD RAIL (karena resolusi & durasi video upload user macem-macem, gak bisa diasumsikan
- * selalu kecil/pendek): ada batas memori (CACHE_MEMORY_BUDGET_BYTES) dan batas durasi cache
- * (CACHE_MAX_DURATION_SECONDS). Begitu salah satu batas ini kelewat SAAT proses cache masih
- * berjalan, cache yang sudah terkumpul langsung dibuang dan otomatis PINDAH ke mode live-decode-
- * streaming (decoder jalan terus real-time, tidak pernah simpan semua frame di RAM) - jadi video
- * panjang/beresolusi besar tetap AMAN diputar, cuma gak sehemat mode cache.
- *
- * Baik mode cache maupun mode live-streaming, decoder SELALU decode ke Surface OFF-SCREEN milik
- * VideoTextureDecoder sendiri (bukan Surface encoder) - draw-loop kita sendiri (pacing absolut
- * nanoTime, sama seperti mode STATIC_IMAGE) yang gambar hasilnya ke Surface encoder. Ini mencegah
- * freeze di tengah rekaman yang dulu terjadi waktu MediaPlayer nulis LANGSUNG ke Surface encoder
- * (decoder bisa blocking kalau BufferQueue penuh & konsumer encoder belum sempat menariknya).
- */
-public class FakeSceneVideoSource extends VideoSource {
+public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeSupport {
 
     private static final String TAG = "FakeSceneVideoSource";
 
@@ -69,6 +41,36 @@ public class FakeSceneVideoSource extends VideoSource {
     private volatile boolean running = false;
     // FPS asli dari encoder (lewat create()), dipakai buat pacing loop gambar.
     private volatile int targetFps = 30;
+
+    // ---- Crossfade transisi scene ----
+    // Durasi fade saat scene ini BARU MULAI (dari snapshot scene sebelumnya -> konten scene ini).
+    private static final long FADE_DURATION_NS = 350_000_000L; // 350ms
+    // Bitmap terakhir dari scene SEBELUMNYA, di-set oleh StreamService.switchScene() SEBELUM
+    // start() dipanggil, supaya draw-loop bisa cross-dissolve dari frame lama ke frame baru
+    // alih-alih langsung "cut" (yang kerasa patah/berat karena teardown+setup source lama&baru).
+    private volatile Bitmap fadeFromSnapshot;
+    private long fadeStartNs = -1L;
+
+    // Buffer offscreen tempat kita compose 1 frame lengkap SEBELUM di-blit ke Surface encoder.
+    // Ini titik yang juga dipakai untuk mengambil "snapshot frame terakhir" saat scene ini
+    // akan diganti ke scene lain (lihat peekCurrentFrame()).
+    private Bitmap frameBuffer;
+    private final Object frameBufferLock = new Object();
+
+    /** Dipanggil StreamService SEBELUM start(), untuk mewariskan frame terakhir scene sebelumnya
+     *  supaya scene ini bisa fade-in dari situ. Aman dipanggil dengan null (tidak ada fade). */
+    public void setFadeFromSnapshot(Bitmap snapshot) {
+        this.fadeFromSnapshot = snapshot;
+    }
+
+    /** Ambil salinan frame yang lagi ditampilkan sekarang (dipakai StreamService sebagai bahan
+     *  fade-out sebelum scene ini di-stop() & diganti scene lain). Bisa null kalau belum ada frame. */
+    public Bitmap peekCurrentFrame() {
+        synchronized (frameBufferLock) {
+            if (frameBuffer == null || frameBuffer.isRecycled()) return null;
+            return frameBuffer.copy(frameBuffer.getConfig(), false);
+        }
+    }
 
     // ---- State khusus mode VIDEO_FILE ----
     private volatile VideoPlaybackState videoPlaybackState = VideoPlaybackState.LOADING_CACHE;
@@ -147,6 +149,15 @@ public class FakeSceneVideoSource extends VideoSource {
         }
         recycleCachedFrames();
         latestLiveFrame = null;
+
+        synchronized (frameBufferLock) {
+            if (frameBuffer != null && !frameBuffer.isRecycled()) frameBuffer.recycle();
+            frameBuffer = null;
+        }
+        if (fadeFromSnapshot != null && !fadeFromSnapshot.isRecycled()) {
+            fadeFromSnapshot.recycle();
+        }
+        fadeFromSnapshot = null;
 
         if (targetSurface != null) {
             targetSurface.release();
@@ -268,10 +279,12 @@ public class FakeSceneVideoSource extends VideoSource {
     private void startDrawLoop() {
         drawThread = new Thread(() -> {
             Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            Paint fadePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
             long frameIntervalNs = 1_000_000_000L / Math.max(1, targetFps);
             long nextFrameTimeNs = System.nanoTime();
             int cacheFrameIndex = 0;
+            fadeStartNs = fadeFromSnapshot != null ? System.nanoTime() : -1L;
 
             while (running && targetSurface != null && targetSurface.isValid()) {
                 long now = System.nanoTime();
@@ -284,49 +297,84 @@ public class FakeSceneVideoSource extends VideoSource {
                     }
                 }
 
-                Canvas canvas = null;
+                Canvas surfaceCanvas = null;
                 try {
-                    canvas = targetSurface.lockCanvas(null);
-                    if (canvas != null) {
-                        int cW = canvas.getWidth();
-                        int cH = canvas.getHeight();
-                        canvas.drawColor(Color.BLACK);
+                    surfaceCanvas = targetSurface.lockCanvas(null);
+                    if (surfaceCanvas != null) {
+                        int cW = surfaceCanvas.getWidth();
+                        int cH = surfaceCanvas.getHeight();
 
-                        Bitmap frame = null;
-                        if (mode == Mode.STATIC_IMAGE) {
-                            frame = staticImage;
-                        } else {
-                            switch (videoPlaybackState) {
-                                case CACHED:
-                                    if (!cachedFrames.isEmpty()) {
-                                        frame = cachedFrames.get(cacheFrameIndex % cachedFrames.size());
-                                        cacheFrameIndex++;
-                                    }
-                                    break;
-                                case LOADING_CACHE:
-                                    // Sambil nunggu cache lengkap, freeze di frame pertama yang
-                                    // sudah masuk (kalau ada) supaya tidak kelihatan hitam kosong.
-                                    if (!cachedFrames.isEmpty()) {
-                                        frame = cachedFrames.get(0);
-                                    }
-                                    break;
-                                case LIVE_STREAM:
-                                default:
-                                    synchronized (liveFrameLock) {
-                                        frame = latestLiveFrame;
-                                    }
-                                    break;
+                        synchronized (frameBufferLock) {
+                            if (frameBuffer == null || frameBuffer.getWidth() != cW || frameBuffer.getHeight() != cH) {
+                                if (frameBuffer != null && !frameBuffer.isRecycled()) frameBuffer.recycle();
+                                frameBuffer = Bitmap.createBitmap(cW, cH, Bitmap.Config.ARGB_8888);
                             }
-                        }
+                            Canvas bufCanvas = new Canvas(frameBuffer);
+                            bufCanvas.drawColor(Color.BLACK);
 
-                        if (frame != null && !frame.isRecycled()) {
-                            Rect dst = fitCenterRect(frame.getWidth(), frame.getHeight(), cW, cH);
-                            canvas.drawBitmap(frame, null, dst, paint);
+                            Bitmap frame = null;
+                            if (mode == Mode.STATIC_IMAGE) {
+                                frame = staticImage;
+                            } else {
+                                switch (videoPlaybackState) {
+                                    case CACHED:
+                                        if (!cachedFrames.isEmpty()) {
+                                            frame = cachedFrames.get(cacheFrameIndex % cachedFrames.size());
+                                            cacheFrameIndex++;
+                                        }
+                                        break;
+                                    case LOADING_CACHE:
+                                        // FIX: dulu freeze di frame pertama selama loading (kelihatan
+                                        // "berhenti"/patah). Sekarang ikut jalan lewat frame yang SUDAH
+                                        // ke-decode sejauh ini (di-clamp, tidak lompat ke frame yang
+                                        // belum ada) - dipacing draw-loop ini sendiri (targetFps),
+                                        // jadi kelihatan main normal, bukan freeze. Begitu
+                                        // videoPlaybackState pindah ke CACHED, cacheFrameIndex sudah
+                                        // nyambung di posisi yang sama - tidak ada lompatan/glitch.
+                                        if (!cachedFrames.isEmpty()) {
+                                            int loadIdx = Math.min(cacheFrameIndex, cachedFrames.size() - 1);
+                                            frame = cachedFrames.get(loadIdx);
+                                            if (cacheFrameIndex < cachedFrames.size() - 1) {
+                                                cacheFrameIndex++;
+                                            }
+                                        }
+                                        break;
+                                    case LIVE_STREAM:
+                                    default:
+                                        synchronized (liveFrameLock) {
+                                            frame = latestLiveFrame;
+                                        }
+                                        break;
+                                }
+                            }
+
+                            if (frame != null && !frame.isRecycled()) {
+                                Rect dst = fitCenterRect(frame.getWidth(), frame.getHeight(), cW, cH);
+                                bufCanvas.drawBitmap(frame, null, dst, paint);
+                            }
+
+                            // Cross-dissolve: kalau baru saja transisi dari scene lain, blend
+                            // snapshot scene lama di atas dengan alpha yang makin turun sampai
+                            // FADE_DURATION_NS terlampaui, lalu snapshot dibuang (tidak dipakai lagi).
+                            Bitmap fadeSnap = fadeFromSnapshot;
+                            if (fadeSnap != null && !fadeSnap.isRecycled() && fadeStartNs >= 0) {
+                                long elapsed = System.nanoTime() - fadeStartNs;
+                                if (elapsed >= FADE_DURATION_NS) {
+                                    fadeFromSnapshot = null;
+                                    fadeSnap.recycle();
+                                } else {
+                                    float t = 1f - ((float) elapsed / FADE_DURATION_NS); // 1 -> 0
+                                    fadePaint.setAlpha(Math.round(t * 255f));
+                                    bufCanvas.drawBitmap(fadeSnap, null, new Rect(0, 0, cW, cH), fadePaint);
+                                }
+                            }
+
+                            surfaceCanvas.drawBitmap(frameBuffer, 0, 0, null);
                         }
                     }
                 } finally {
-                    if (canvas != null) {
-                        targetSurface.unlockCanvasAndPost(canvas);
+                    if (surfaceCanvas != null) {
+                        targetSurface.unlockCanvasAndPost(surfaceCanvas);
                     }
                 }
 
