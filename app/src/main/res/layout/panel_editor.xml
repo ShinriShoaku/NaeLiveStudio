@@ -106,6 +106,34 @@
                     android:layout_marginTop="2dp" />
             </LinearLayout>
 
+            <LinearLayout
+                android:id="@+id/toolAddVoiceAnim"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddVoiceAnim"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="@android:color/transparent"
+                    android:src="@drawable/camera_retro"
+                    android:padding="10dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah Voice Animation" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Voice Anim"
+                    android:textColor="#AAA"
+                    android:textSize="10sp"
+                    android:layout_marginTop="2dp" />
+            </LinearLayout>
+
         </LinearLayout>
 
         <!-- ===================== LAYER STRIP: klik utk pilih, X utk hapus ===================== -->

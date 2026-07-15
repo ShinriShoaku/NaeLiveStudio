@@ -57,6 +57,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         public final LayerType type;
         public final float x, y, w, h;
         public final int zIndex;
+        public ame.project.nlstudio.scene.VoiceAnimConfig voiceAnimConfig;
+        public java.util.Map<String, Bitmap> voiceAnimBitmaps;
 
         public Layer(Bitmap bitmap, String uri, LayerType type, float x, float y, float w, float h, int zIndex) {
             this.bitmap = bitmap;
@@ -101,6 +103,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     // FPS asli yang diminta encoder lewat create(). Dipakai buat pacing draw loop biar
     // gak hardcode 30fps - kalau user pilih 24/25/60fps di UI, draw loop ikut menyesuaikan.
     private volatile int targetFps = 30;
+    private volatile float micLevel = 0.0f;
 
     // Resolusi ASLI yang diminta encoder lewat create(). Ini yang dipakai buat set ukuran
     // buffer SurfaceTexture, BUKAN designWidth/designHeight (yang cuma dipakai buat hitung
@@ -161,6 +164,10 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         this.designWidth = width;
         this.designHeight = height;
         Log.d(TAG, "setResolution() dipanggil dari StreamService: designWidth/Height = " + width + "x" + height);
+    }
+
+    public void setMicLevel(float level) {
+        this.micLevel = level;
     }
 
     @Override
@@ -625,6 +632,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         for (Layer layer : layers) {
             Bitmap bmp = layer.bitmap;
             boolean isScreen = layer.type == LayerType.SCREEN;
+            boolean isVoiceAnim = layer.type == LayerType.VOICE_ANIM;
 
             RectF dst = new RectF(
                     layer.x * cW,
@@ -648,9 +656,51 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                 continue;
             }
 
+            if (isVoiceAnim && layer.voiceAnimConfig != null && layer.voiceAnimBitmaps != null) {
+                float level = this.micLevel;
+                ame.project.nlstudio.scene.VoiceAnimItem selectedItem = null;
+                float maxThreshold = -1f;
+                for (ame.project.nlstudio.scene.VoiceAnimItem item : layer.voiceAnimConfig.getItems()) {
+                    if (level >= item.getThreshold() && item.getThreshold() > maxThreshold) {
+                        if (layer.voiceAnimBitmaps.containsKey(item.getImageUri())) {
+                            selectedItem = item;
+                            maxThreshold = item.getThreshold();
+                        }
+                    }
+                }
+                if (selectedItem != null) {
+                    bmp = layer.voiceAnimBitmaps.get(selectedItem.getImageUri());
+                }
+
+                // Brightness & Scale effect using dynamic config
+                float minB = layer.voiceAnimConfig.getMinBrightness();
+                float sInt = layer.voiceAnimConfig.getScaleIntensity();
+                float tStart = layer.voiceAnimConfig.getEffectThresholdStart();
+                float tEnd = layer.voiceAnimConfig.getEffectThresholdEnd();
+
+                float range = Math.max(0.01f, tEnd - tStart);
+                float normalizedLevel = Math.max(0.0f, Math.min(1.0f, (level - tStart) / range));
+
+                float brightness = minB + (normalizedLevel * (1.0f - minB));
+                android.graphics.ColorMatrix cm = new android.graphics.ColorMatrix();
+                cm.setScale(brightness, brightness, brightness, 1f);
+                paint.setColorFilter(new android.graphics.ColorMatrixColorFilter(cm));
+
+                float baseScale = 1.0f - (sInt / 2.0f);
+                float scale = baseScale + (normalizedLevel * sInt);
+                float centerX = dst.centerX();
+                float centerY = dst.centerY();
+                float newW = dst.width() * scale;
+                float newH = dst.height() * scale;
+                dst.set(centerX - newW / 2f, centerY - newH / 2f, centerX + newW / 2f, centerY + newH / 2f);
+            }
+
             if (bmp != null && !bmp.isRecycled()) {
                 canvas.drawBitmap(bmp, null, dst, paint);
             }
+            
+            // Reset filter for next layers
+            paint.setColorFilter(null);
         }
     }
 

@@ -71,7 +71,7 @@ class MainActivity : AppCompatActivity() {
 
     // Top Bar UI
     private lateinit var btnSettings: android.widget.ImageButton
-    private lateinit var btnQuickRecord: android.widget.ImageButton
+    private lateinit var btnVoiceAnim: android.widget.ImageButton
     private lateinit var btnQuickLive: android.widget.ImageButton
     private lateinit var btnSceneManager: android.widget.ImageButton
     private lateinit var tvSceneNameTitle: TextView
@@ -118,6 +118,7 @@ class MainActivity : AppCompatActivity() {
     // Main Preview Tool Menu
     private lateinit var btnAddImage: android.widget.ImageButton
     private lateinit var btnAddText: android.widget.ImageButton
+    private lateinit var btnAddVoiceAnim: android.widget.ImageButton
     private lateinit var btnBgPicker: android.widget.ImageButton
     private lateinit var btnSaveSceneMain: Button
     private lateinit var viewPager: androidx.viewpager2.widget.ViewPager2
@@ -306,11 +307,13 @@ class MainActivity : AppCompatActivity() {
         etNewSceneName = dialogSceneManagerView.findViewById(R.id.etNewSceneName)
         spinnerRootLayout = dialogSceneManagerView.findViewById(R.id.spinnerRootLayout)
 
-        spinnerRootLayout.adapter = ArrayAdapter(
+        val adapter = ArrayAdapter(
             this,
-            android.R.layout.simple_spinner_dropdown_item,
+            android.R.layout.simple_spinner_item,
             resources.getStringArray(R.array.root_layout_options)
         )
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerRootLayout.adapter = adapter
         // Kalau user MANUAL ganti pilihan resolusi root, batalkan resolusi paksa dari preset
         // (biar gak nyangkut dan bikin bingung kalau user pindah preset lalu ganti manual).
         spinnerRootLayout.setOnTouchListener { _, _ -> rootLayoutUserTouched = true; false }
@@ -329,7 +332,7 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
 
         btnSettings = findViewById(R.id.btnSettings)
-        btnQuickRecord = findViewById(R.id.btnQuickRecord)
+        btnVoiceAnim = findViewById(R.id.btnVoiceAnim)
         btnQuickLive = findViewById(R.id.btnQuickLive)
         btnSceneManager = findViewById(R.id.btnSceneManager)
         tvSceneNameTitle = findViewById(R.id.tvSceneNameTitle)
@@ -366,20 +369,24 @@ class MainActivity : AppCompatActivity() {
         refreshCanvasLayers()
 
         btnSettings.setOnClickListener { showSettingsDialog() }
-        btnQuickRecord.setOnClickListener { findViewById<Button>(R.id.btnTestRecord)?.performClick() ?: run {
-            pendingAction = StreamService.ACTION_TEST_RECORD
-            checkPermissionsThenStart()
-        } }
+        btnVoiceAnim.setOnClickListener {
+            // Open Voice Animation Settings Activity
+            val intent = Intent(this, VoiceAnimSettingsActivity::class.java)
+            startActivity(intent)
+        }
         btnQuickLive.setOnClickListener { findViewById<Button>(R.id.btnStart).performClick() }
         btnSceneManager.setOnClickListener { showSceneManagerDialog() }
 
         // VU meter Mic & Sistem: AudioMixSource ngirim level dari thread capture-nya sendiri,
         // makanya di-lempar ke main thread dulu sebelum nyentuh View.
-        AudioLevelBus.setListener { mic, system ->
-            runOnUiThread {
-                if (::vuMicLevel.isInitialized) vuMicLevel.setLevel(mic)
-                if (::vuSystemLevel.isInitialized) vuSystemLevel.setLevel(system)
-            }
+        AudioLevelBus.registerListener(audioLevelListener)
+    }
+
+    private val audioLevelListener = AudioLevelBus.Listener { mic, system ->
+        runOnUiThread {
+            if (::vuMicLevel.isInitialized) vuMicLevel.setLevel(mic)
+            if (::vuSystemLevel.isInitialized) vuSystemLevel.setLevel(system)
+            sceneCanvasView.setVoiceAnimLevel(mic, sceneRepository)
         }
     }
 
@@ -402,7 +409,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        AudioLevelBus.setListener(null)
+        AudioLevelBus.unregisterListener(audioLevelListener)
     }
 
     private fun showSettingsDialog() {
@@ -467,6 +474,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupEditorPanel(root: View) {
         btnAddImage = root.findViewById(R.id.btnAddImage)
         btnAddText = root.findViewById(R.id.btnAddText)
+        btnAddVoiceAnim = root.findViewById(R.id.btnAddVoiceAnim)
         btnBgPicker = root.findViewById(R.id.btnBgPicker)
         btnSaveSceneMain = root.findViewById(R.id.btnSaveScene)
 
@@ -507,6 +515,7 @@ class MainActivity : AppCompatActivity() {
     private fun setupMainSceneTools() {
         btnAddImage.setOnClickListener { showAddLayerOptions() }
         btnAddText.setOnClickListener { showAddTextDialog() }
+        btnAddVoiceAnim.setOnClickListener { showAddVoiceAnimOptions() }
         btnBgPicker.setOnClickListener { showBackgroundPickerOptions() }
         btnSaveSceneMain.setOnClickListener { showSaveSceneDialog() }
 
@@ -566,6 +575,24 @@ class MainActivity : AppCompatActivity() {
         editingLayers.removeAll { it.id == layerId }
         if (selectedLayerId == layerId) selectedLayerId = null
         refreshCanvasLayers()
+    }
+
+    private fun showAddVoiceAnimOptions() {
+        // Just add a Voice Animation layer using the current default config
+        val prefs = getSharedPreferences("voice_anim_prefs", Context.MODE_PRIVATE)
+        val configJson = prefs.getString("default_config", "") ?: ""
+        
+        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val newLayer = SceneLayer(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.VOICE_ANIM,
+            uri = "voiceanim:default",
+            x = 0.3f, y = 0.3f, w = 0.35f, h = 0.35f,
+            zIndex = nextZ
+        )
+        editingLayers.add(newLayer)
+        refreshCanvasLayers()
+        Toast.makeText(this, "Voice Animation ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
     private fun showAddLayerOptions() {
@@ -1069,11 +1096,13 @@ class MainActivity : AppCompatActivity() {
 
         installedApps = listOf(AppEntry("Semua Audio Sistem", "", -1)) + apps
 
-        spinnerGameAudioApp.adapter = ArrayAdapter(
+        val adapter = ArrayAdapter(
             this,
-            android.R.layout.simple_spinner_dropdown_item,
+            android.R.layout.simple_spinner_item,
             installedApps.map { it.label }
         )
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerGameAudioApp.adapter = adapter
     }
 
     /** Kirim perintah ganti scene ke StreamService yang lagi jalan (aman dipanggil walau service belum start). */

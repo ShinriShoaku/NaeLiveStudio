@@ -9,7 +9,7 @@ package ame.project.nlstudio.scene
  */
 enum class BackgroundType { SCREEN, COLOR, IMAGE, VIDEO }
 
-enum class LayerType { IMAGE, ICON, TEXT, VIDEO, SCREEN }
+enum class LayerType { IMAGE, ICON, TEXT, VIDEO, SCREEN, VOICE_ANIM }
 
 /**
  * Satu item overlay (gambar/icon) di atas background. Posisi & ukuran disimpan dalam RASIO 0..1

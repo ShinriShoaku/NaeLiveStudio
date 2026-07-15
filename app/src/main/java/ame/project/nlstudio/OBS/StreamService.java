@@ -233,7 +233,18 @@ public class StreamService extends Service implements ConnectChecker {
         super.onCreate();
         isServiceRunning = true;
         rtmpStream = new RtmpStream(this, this);
+        AudioLevelBus.registerListener(audioLevelListener);
     }
+
+    private final AudioLevelBus.Listener audioLevelListener = new AudioLevelBus.Listener() {
+        @Override
+        public void onLevels(float micLevel, float systemLevel) {
+            com.pedro.encoder.input.sources.video.VideoSource source = currentSceneSource;
+            if (source instanceof CompositeSceneVideoSource) {
+                ((CompositeSceneVideoSource) source).setMicLevel(micLevel);
+            }
+        }
+    };
 
     @Nullable
     @Override
@@ -620,15 +631,35 @@ public class StreamService extends Service implements ConnectChecker {
                 Uri layerUri = Uri.parse(lo.getString("uri"));
 
                 Bitmap bmp = null;
+                ame.project.nlstudio.scene.VoiceAnimConfig vaConfig = null;
+                java.util.Map<String, Bitmap> vaBitmaps = null;
+
                 if ("VIDEO".equals(layerType)) {
                     bmp = loadVideoFirstFrame(layerUri);
+                } else if ("VOICE_ANIM".equals(layerType)) {
+                    // Load global voice anim config
+                    android.content.SharedPreferences prefs = getSharedPreferences("voice_anim_prefs", Context.MODE_PRIVATE);
+                    String configJson = prefs.getString("default_config", null);
+                    vaConfig = ame.project.nlstudio.scene.VoiceAnimConfig.Companion.fromJson(configJson);
+                    vaBitmaps = new java.util.HashMap<>();
+                    for (ame.project.nlstudio.scene.VoiceAnimItem item : vaConfig.getItems()) {
+                        if (!item.getImageUri().isEmpty() && !vaBitmaps.containsKey(item.getImageUri())) {
+                            Bitmap b = loadBitmapPreserveAspect(Uri.parse(item.getImageUri()));
+                            if (b != null) vaBitmaps.put(item.getImageUri(), b);
+                        }
+                    }
+                    // Initial bitmap for thumbnail/first frame
+                    if (!vaConfig.getItems().isEmpty()) {
+                        String firstUri = vaConfig.getItems().get(0).getImageUri();
+                        if (!firstUri.isEmpty()) bmp = vaBitmaps.get(firstUri);
+                    }
                 } else if (!"SCREEN".equals(layerType)) {
                     bmp = loadBitmapPreserveAspect(layerUri);
                 }
 
-                if (bmp == null && !"SCREEN".equals(layerType)) continue;
+                if (bmp == null && !"SCREEN".equals(layerType) && !"VOICE_ANIM".equals(layerType)) continue;
 
-                layers.add(new CompositeSceneVideoSource.Layer(
+                CompositeSceneVideoSource.Layer layer = new CompositeSceneVideoSource.Layer(
                         bmp,
                         lo.optString("uri", ""),
                         ame.project.nlstudio.scene.LayerType.valueOf(layerType),
@@ -637,7 +668,10 @@ public class StreamService extends Service implements ConnectChecker {
                         (float) lo.getDouble("w"),
                         (float) lo.getDouble("h"),
                         lo.optInt("zIndex", 0)
-                ));
+                );
+                layer.voiceAnimConfig = vaConfig;
+                layer.voiceAnimBitmaps = vaBitmaps;
+                layers.add(layer);
             }
         }
         // urutin sesuai zIndex biar layer "belakang" digambar duluan, layer "depan" nutup di atasnya
@@ -984,6 +1018,7 @@ public class StreamService extends Service implements ConnectChecker {
         stopEverything();
         isServiceRunning = false;
         sceneSwitchExecutor.shutdownNow();
+        AudioLevelBus.unregisterListener(audioLevelListener);
         super.onDestroy();
     }
 

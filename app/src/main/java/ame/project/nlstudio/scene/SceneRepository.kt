@@ -169,8 +169,18 @@ class SceneRepository(private val context: Context) {
         return when (layer.type) {
             LayerType.VIDEO -> extractVideoFrame(Uri.parse(layer.uri))
             LayerType.SCREEN -> renderScreenPlaceholder()
+            LayerType.VOICE_ANIM -> loadVoiceAnimPreview(layer)
             else -> loadPreviewBitmap(Uri.parse(layer.uri))
         }
+    }
+
+    private fun loadVoiceAnimPreview(layer: SceneLayer): Bitmap? {
+        val prefs = context.getSharedPreferences("voice_anim_prefs", Context.MODE_PRIVATE)
+        val configJson = prefs.getString("default_config", null)
+        val config = VoiceAnimConfig.fromJson(configJson)
+        val firstImage = config.items.firstOrNull { it.imageUri.isNotEmpty() }?.imageUri
+        return if (firstImage != null) loadPreviewBitmap(Uri.parse(firstImage)) 
+               else renderTextToBitmap("VOICE ANIM")
     }
 
     private fun renderScreenPlaceholder(): Bitmap {

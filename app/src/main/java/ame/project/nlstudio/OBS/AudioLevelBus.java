@@ -5,20 +5,34 @@ package ame.project.nlstudio.OBS;
  * capture Service) ke UI (Activity) secara real-time, biar bisa nampilin VU meter kayak OBS.
  * Bukan event bus umum, sengaja simpel (cuma 1 listener) karena cuma dipakai 1 layar mixer.
  */
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
 public class AudioLevelBus {
 
     public interface Listener {
         void onLevels(float micLevel, float systemLevel);
     }
 
-    private static volatile Listener listener;
+    private static final List<Listener> listeners = new CopyOnWriteArrayList<>();
 
+    public static void registerListener(Listener l) {
+        if (!listeners.contains(l)) listeners.add(l);
+    }
+
+    public static void unregisterListener(Listener l) {
+        listeners.remove(l);
+    }
+
+    // Deprecated, use register/unregister
     public static void setListener(Listener l) {
-        listener = l;
+        listeners.clear();
+        if (l != null) listeners.add(l);
     }
 
     public static void publish(float micLevel, float systemLevel) {
-        Listener l = listener;
-        if (l != null) l.onLevels(micLevel, systemLevel);
+        for (Listener l : listeners) {
+            l.onLevels(micLevel, systemLevel);
+        }
     }
 }

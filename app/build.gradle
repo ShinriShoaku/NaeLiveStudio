@@ -16,8 +16,8 @@ android {
         applicationId "ame.project.nlstudio"
         minSdk 24
         targetSdk 36
-        versionCode 3
-        versionName "1.6.0"
+        versionCode 4
+        versionName "1.8.0-dev"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }

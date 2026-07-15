@@ -64,6 +64,9 @@ class SceneCanvasView @JvmOverloads constructor(
 
     private var selectedLayerId: String? = null
 
+    private val voiceAnimViews = mutableMapOf<String, ImageView>()
+    private var currentLayers: List<SceneLayer> = emptyList()
+
     private val minLayerPx get() = (48 * resources.displayMetrics.density).toInt()
 
     private val progressHandler = Handler(Looper.getMainLooper())
@@ -292,6 +295,38 @@ class SceneCanvasView @JvmOverloads constructor(
     // Layers (chip overlay: bisa di-drag, di-resize, di-tap buat dipilih)
     // ---------------------------------------------------------------------
 
+    fun setVoiceAnimLevel(level: Float, sceneRepository: ame.project.nlstudio.scene.SceneRepository) {
+        val prefs = context.getSharedPreferences("voice_anim_prefs", Context.MODE_PRIVATE)
+        val configJson = prefs.getString("default_config", null)
+        val config = ame.project.nlstudio.scene.VoiceAnimConfig.fromJson(configJson)
+        
+        val item = config.items.filter { it.imageUri.isNotEmpty() }
+            .sortedByDescending { it.threshold }
+            .firstOrNull { level >= it.threshold } ?: return
+
+        // Normalize level based on threshold start and end from config
+        val range = (config.effectThresholdEnd - config.effectThresholdStart).coerceAtLeast(0.01f)
+        val normalizedLevel = ((level - config.effectThresholdStart) / range).coerceIn(0f, 1f)
+
+        // Brightness effect using dynamic minBrightness from config
+        val brightness = config.minBrightness + (normalizedLevel * (1f - config.minBrightness))
+        val matrix = android.graphics.ColorMatrix().apply {
+            setScale(brightness, brightness, brightness, 1f)
+        }
+        val filter = android.graphics.ColorMatrixColorFilter(matrix)
+
+        // Scale effect using dynamic scaleIntensity from config
+        val baseScale = 1.0f - (config.scaleIntensity / 2f)
+        val scale = baseScale + (normalizedLevel * config.scaleIntensity)
+
+        voiceAnimViews.forEach { (_, iv) ->
+            iv.setImageBitmap(sceneRepository.loadPreviewBitmap(android.net.Uri.parse(item.imageUri)))
+            iv.colorFilter = filter
+            iv.scaleX = scale
+            iv.scaleY = scale
+        }
+    }
+
     /** Highlight chip yang lagi dipilih tanpa perlu rebuild semua chip dari nol. */
     fun setSelectedLayer(layerId: String?) {
         selectedLayerId = layerId
@@ -306,6 +341,8 @@ class SceneCanvasView @JvmOverloads constructor(
     /** Gambar ulang semua layer chip di atas background sesuai data terbaru, TANPA nyentuh view background
      *  (biar video background yang lagi main gak ke-restart tiap kali ada layer ditambah/digeser). */
     fun setLayers(layers: List<SceneLayer>, bitmapLoader: (SceneLayer) -> Bitmap?) {
+        currentLayers = layers
+        voiceAnimViews.clear()
         val chipsToRemove = mutableListOf<View>()
         for (i in 0 until childCount) {
             val child = getChildAt(i)
@@ -314,7 +351,12 @@ class SceneCanvasView @JvmOverloads constructor(
         chipsToRemove.forEach { removeView(it) }
 
         layers.sortedBy { it.zIndex }.forEach { layer ->
-            addView(buildLayerChip(layer, bitmapLoader(layer)))
+            val chip = buildLayerChip(layer, bitmapLoader(layer))
+            if (layer.type == LayerType.VOICE_ANIM) {
+                val contentIv = chip.findViewById<ImageView>(R.id.layer_content_iv)
+                if (contentIv != null) voiceAnimViews[layer.id] = contentIv
+            }
+            addView(chip)
         }
     }
 
@@ -323,6 +365,7 @@ class SceneCanvasView @JvmOverloads constructor(
         chip.tag = layer.id
 
         val content = ImageView(context).apply {
+            id = R.id.layer_content_iv
             scaleType = ImageView.ScaleType.FIT_XY
             setImageBitmap(bitmap)
         }
@@ -333,6 +376,7 @@ class SceneCanvasView @JvmOverloads constructor(
         val badgeIcon = when (layer.type) {
             LayerType.VIDEO -> android.R.drawable.ic_media_play
             LayerType.TEXT -> android.R.drawable.ic_menu_edit
+            LayerType.VOICE_ANIM -> android.R.drawable.ic_btn_speak_now
             else -> null
         }
         if (badgeIcon != null) {

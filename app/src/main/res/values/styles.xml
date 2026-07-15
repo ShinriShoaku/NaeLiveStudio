@@ -9,26 +9,26 @@
         <item name="android:layout_marginBottom">4dp</item>
     </style>
 
-    <style name="PrimaryButton">
+    <style name="PrimaryButton" parent="Widget.Material3.Button">
         <item name="android:backgroundTint">#E53950</item>
         <item name="android:textColor">#FFFFFF</item>
         <item name="android:textStyle">bold</item>
         <item name="android:padding">14dp</item>
     </style>
 
-    <style name="SecondaryButton">
+    <style name="SecondaryButton" parent="Widget.Material3.Button">
         <item name="android:backgroundTint">#2C2F36</item>
         <item name="android:textColor">#FFFFFF</item>
         <item name="android:padding">14dp</item>
     </style>
 
-    <style name="DangerButton">
+    <style name="DangerButton" parent="Widget.Material3.Button">
         <item name="android:backgroundTint">#3A3D44</item>
         <item name="android:textColor">#FF8A8A</item>
         <item name="android:padding">14dp</item>
     </style>
 
-    <style name="SceneButton">
+    <style name="SceneButton" parent="Widget.Material3.Button">
         <item name="android:backgroundTint">#2C2F36</item>
         <item name="android:textColor">#FFFFFF</item>
         <item name="android:textSize">12sp</item>
