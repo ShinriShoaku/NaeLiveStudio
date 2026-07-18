@@ -9,7 +9,11 @@ package ame.project.nlstudio.scene
  */
 enum class BackgroundType { SCREEN, COLOR, IMAGE, VIDEO }
 
-enum class LayerType { IMAGE, ICON, TEXT, VIDEO, SCREEN, VOICE_ANIM, TIKTOK_CHAT, TIKTOK_GIFT, TIKTOK_JOIN }
+enum class LayerType {
+    IMAGE, ICON, TEXT, VIDEO, SCREEN, VOICE_ANIM,
+    TIKTOK_CHAT, TIKTOK_GIFT, TIKTOK_JOIN,
+    MUSIC_CURRENT, MUSIC_QUEUE
+}
 
 /**
  * Satu item overlay (gambar/icon) di atas background. Posisi & ukuran disimpan dalam RASIO 0..1

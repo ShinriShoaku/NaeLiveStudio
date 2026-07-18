@@ -239,8 +239,59 @@
                     android:textSize="9sp" />
             </LinearLayout>
 
-            <!-- Spacer biar gak terlalu renggang kalau cuma 3 -->
-            <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
+            <LinearLayout
+                android:id="@+id/toolAddMusicCurrent"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddMusicCurrent"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/ic_media_play"
+                    android:padding="8dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah Music Current" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Music"
+                    android:textColor="#AAA"
+                    android:textSize="9sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/toolAddMusicQueue"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddMusicQueue"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/ic_menu_recent_history"
+                    android:padding="8dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah Music Queue" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Queue"
+                    android:textColor="#AAA"
+                    android:textSize="9sp" />
+            </LinearLayout>
 
         </LinearLayout>
 

@@ -20,6 +20,8 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import ame.project.nlstudio.scene.LayerType;
+import ame.project.nlstudio.OBS.MusicBus;
+import ame.project.nlstudio.OBS.TikTokChatBus;
 
 /**
  * Video source ala OBS: gambar BACKGROUND lalu di atasnya digambar semua LAYER overlay.
@@ -506,6 +508,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             boolean isTikTokChat = layer.type == LayerType.TIKTOK_CHAT;
             boolean isTikTokGift = layer.type == LayerType.TIKTOK_GIFT;
             boolean isTikTokJoin = layer.type == LayerType.TIKTOK_JOIN;
+            boolean isMusicCurrent = layer.type == LayerType.MUSIC_CURRENT;
+            boolean isMusicQueue = layer.type == LayerType.MUSIC_QUEUE;
 
             RectF dst = new RectF(
                     layer.x * cW,
@@ -520,7 +524,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             // IKanaeCallback. Sekarang di-render ULANG TIAP FRAME dari data live yang ditampung
             // TikTokChatBus (diisi StreamService lewat binding ke IKanaeService), mirip pola
             // layer SCREEN yang ambil globalScreenFrame tiap frame.
-            if (isTikTokChat || isTikTokGift || isTikTokJoin) {
+            if (isTikTokChat || isTikTokGift || isTikTokJoin || isMusicCurrent || isMusicQueue) {
                 int lw = Math.max(1, Math.round(dst.width()));
                 int lh = Math.max(1, Math.round(dst.height()));
                 if (isTikTokChat) {
@@ -529,6 +533,10 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                     bmp = TikTokChatBus.getInstance().renderGiftOverlay(context, lw, lh);
                 } else if (isTikTokJoin) {
                     bmp = TikTokChatBus.getInstance().renderJoinOverlay(context, lw, lh);
+                } else if (isMusicCurrent) {
+                    bmp = MusicBus.getInstance().renderCurrentSong(context, lw, lh);
+                } else if (isMusicQueue) {
+                    bmp = MusicBus.getInstance().renderQueue(context, lw, lh);
                 }
                 if (bmp != null && !bmp.isRecycled()) {
                     canvas.drawBitmap(bmp, null, dst, paint);

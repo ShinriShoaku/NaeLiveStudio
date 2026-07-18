@@ -124,6 +124,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnAddTikTokChat: android.widget.ImageButton
     private lateinit var btnAddTikTokGift: android.widget.ImageButton
     private lateinit var btnAddTikTokJoin: android.widget.ImageButton
+    private lateinit var btnAddMusicCurrent: android.widget.ImageButton
+    private lateinit var btnAddMusicQueue: android.widget.ImageButton
     private lateinit var btnBgPicker: android.widget.ImageButton
     private lateinit var btnSaveSceneMain: Button
     private lateinit var viewPager: androidx.viewpager2.widget.ViewPager2
@@ -493,6 +495,8 @@ class MainActivity : AppCompatActivity() {
         btnAddTikTokChat = root.findViewById(R.id.btnAddTikTokChat)
         btnAddTikTokGift = root.findViewById(R.id.btnAddTikTokGift)
         btnAddTikTokJoin = root.findViewById(R.id.btnAddTikTokJoin)
+        btnAddMusicCurrent = root.findViewById(R.id.btnAddMusicCurrent)
+        btnAddMusicQueue = root.findViewById(R.id.btnAddMusicQueue)
         btnBgPicker = root.findViewById(R.id.btnBgPicker)
         btnSaveSceneMain = root.findViewById(R.id.btnSaveScene)
 
@@ -543,6 +547,8 @@ class MainActivity : AppCompatActivity() {
         btnAddTikTokChat.setOnClickListener { addTikTokChatLayer() }
         btnAddTikTokGift.setOnClickListener { addTikTokGiftLayer() }
         btnAddTikTokJoin.setOnClickListener { addTikTokJoinLayer() }
+        btnAddMusicCurrent.setOnClickListener { addMusicCurrentLayer() }
+        btnAddMusicQueue.setOnClickListener { addMusicQueueLayer() }
         btnBgPicker.setOnClickListener { showBackgroundPickerOptions() }
         btnSaveSceneMain.setOnClickListener { showSaveSceneDialog() }
 
@@ -692,6 +698,34 @@ class MainActivity : AppCompatActivity() {
         editingLayers.add(newLayer)
         refreshCanvasLayers()
         Toast.makeText(this, "TikTok Join ditambahkan", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addMusicCurrentLayer() {
+        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val newLayer = SceneLayer(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.MUSIC_CURRENT,
+            uri = "music:current",
+            x = 0.1f, y = 0.1f, w = 0.8f, h = 0.2f,
+            zIndex = nextZ
+        )
+        editingLayers.add(newLayer)
+        refreshCanvasLayers()
+        Toast.makeText(this, "Music Current ditambahkan", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addMusicQueueLayer() {
+        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val newLayer = SceneLayer(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.MUSIC_QUEUE,
+            uri = "music:queue",
+            x = 0.1f, y = 0.4f, w = 0.8f, h = 0.5f,
+            zIndex = nextZ
+        )
+        editingLayers.add(newLayer)
+        refreshCanvasLayers()
+        Toast.makeText(this, "Music Queue ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
     private fun setupEditorTabs() {

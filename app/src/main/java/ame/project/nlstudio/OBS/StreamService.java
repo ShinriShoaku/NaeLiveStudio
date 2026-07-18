@@ -263,6 +263,13 @@ public class StreamService extends Service implements ConnectChecker {
             try {
                 kanaeService.registerCallback(kanaeCallback);
                 Log.d(TAG, "Kanae service terhubung, callback TikTok terdaftar");
+
+                // Request initial data
+                kanaeService.requestQueue();
+                String currentSong = kanaeService.getCurrentSongJson();
+                if (currentSong != null && !currentSong.isEmpty()) {
+                    MusicBus.getInstance().onCurrentSongUpdate(currentSong);
+                }
             } catch (Exception e) {
                 Log.e(TAG, "Gagal registerCallback ke Kanae", e);
             }
@@ -278,13 +285,17 @@ public class StreamService extends Service implements ConnectChecker {
 
     private final ame.project.nlsdk.IKanaeCallback.Stub kanaeCallback = new ame.project.nlsdk.IKanaeCallback.Stub() {
         @Override
-        public void onTrackChanged(String title, String artist, String duration, String thumbnail) { }
+        public void onTrackChanged(String title, String artist, String duration, String thumbnail) {
+            MusicBus.getInstance().onTrackChanged(title, artist, duration, thumbnail);
+        }
 
         @Override
         public void onLyricsChanged(String lyrics) { }
 
         @Override
-        public void onQueueChanged(String queueJson) { }
+        public void onQueueChanged(String queueJson) {
+            MusicBus.getInstance().onQueueChanged(queueJson);
+        }
 
         @Override
         public void onPlaybackStatusChanged(boolean isPlaying, long position, long duration) { }
@@ -1333,6 +1344,7 @@ public class StreamService extends Service implements ConnectChecker {
         AudioLevelBus.unregisterListener(audioLevelListener);
         unbindKanaeService();
         TikTokChatBus.getInstance().reset();
+        MusicBus.getInstance().reset();
         // FIX MEMORI: sekarang prewarmAllVideoBackgroundCaches() lebih agresif ngisi cache (semua
         // scene video, bukan cuma yang lagi dipakai) - bersihkan begitu live/record selesai supaya
         // RAM-nya tidak nyangkut kepakai terus selama proses app masih hidup di background.
