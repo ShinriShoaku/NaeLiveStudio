@@ -39,6 +39,17 @@
             android:layout_weight="1" />
 
         <androidx.appcompat.widget.AppCompatImageButton
+            android:id="@+id/btnKanae"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginEnd="5dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/kanae"
+            android:scaleType="centerInside"
+            android:padding="6dp"
+            android:contentDescription="Kanae Music" />
+
+        <androidx.appcompat.widget.AppCompatImageButton
             android:id="@+id/btnSettings"
             android:layout_width="36dp"
             android:layout_height="36dp"

@@ -14,13 +14,28 @@
         android:paddingTop="10dp"
         android:paddingBottom="12dp">
 
-        <!-- ===================== TOOLBAR: Background / Tambah / Teks ===================== -->
+        <!-- ===================== TOOLBAR TABS ===================== -->
+        <com.google.android.material.tabs.TabLayout
+            android:id="@+id/tabEditorTools"
+            android:layout_width="match_parent"
+            android:layout_height="36dp"
+            app:tabIndicatorColor="#7FD8A6"
+            app:tabSelectedTextColor="#7FD8A6"
+            app:tabTextColor="#666"
+            app:tabMode="fixed"
+            app:tabIndicatorHeight="2dp"
+            app:tabTextAppearance="@style/TextAppearance.MaterialComponents.Caption"
+            android:background="@android:color/transparent" />
+
+        <!-- ===================== TOOLS: UMUM ===================== -->
         <LinearLayout
+            android:id="@+id/layoutToolsGeneral"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:background="@drawable/bg_scene_card"
-            android:padding="10dp">
+            android:padding="8dp"
+            android:layout_marginTop="4dp">
 
             <LinearLayout
                 android:id="@+id/toolBgPicker"
@@ -34,20 +49,19 @@
                 android:background="?attr/selectableItemBackgroundBorderless">
                 <ImageButton
                     android:id="@+id/btnBgPicker"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:background="@android:color/transparent"
                     android:src="@android:drawable/ic_menu_slideshow"
-                    android:padding="10dp"
+                    android:padding="8dp"
                     app:tint="#7FD8A6"
                     android:contentDescription="Ganti background" />
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Background"
+                    android:text="BG"
                     android:textColor="#AAA"
-                    android:textSize="10sp"
-                    android:layout_marginTop="2dp" />
+                    android:textSize="9sp" />
             </LinearLayout>
 
             <LinearLayout
@@ -62,20 +76,19 @@
                 android:background="?attr/selectableItemBackgroundBorderless">
                 <ImageButton
                     android:id="@+id/btnAddImage"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:background="@android:color/transparent"
                     android:src="@android:drawable/ic_menu_gallery"
-                    android:padding="10dp"
+                    android:padding="8dp"
                     app:tint="#7FD8A6"
                     android:contentDescription="Tambah layer gambar/video" />
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Gambar/Video"
+                    android:text="Media"
                     android:textColor="#AAA"
-                    android:textSize="10sp"
-                    android:layout_marginTop="2dp" />
+                    android:textSize="9sp" />
             </LinearLayout>
 
             <LinearLayout
@@ -90,11 +103,11 @@
                 android:background="?attr/selectableItemBackgroundBorderless">
                 <ImageButton
                     android:id="@+id/btnAddText"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:background="@android:color/transparent"
                     android:src="@android:drawable/ic_menu_edit"
-                    android:padding="10dp"
+                    android:padding="8dp"
                     app:tint="#7FD8A6"
                     android:contentDescription="Tambah layer teks" />
                 <TextView
@@ -102,8 +115,7 @@
                     android:layout_height="wrap_content"
                     android:text="Teks"
                     android:textColor="#AAA"
-                    android:textSize="10sp"
-                    android:layout_marginTop="2dp" />
+                    android:textSize="9sp" />
             </LinearLayout>
 
             <LinearLayout
@@ -118,21 +130,117 @@
                 android:background="?attr/selectableItemBackgroundBorderless">
                 <ImageButton
                     android:id="@+id/btnAddVoiceAnim"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
                     android:background="@android:color/transparent"
                     android:src="@drawable/camera_retro"
-                    android:padding="10dp"
+                    android:padding="8dp"
                     app:tint="#7FD8A6"
                     android:contentDescription="Tambah Voice Animation" />
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Voice Anim"
+                    android:text="Voice"
                     android:textColor="#AAA"
-                    android:textSize="10sp"
-                    android:layout_marginTop="2dp" />
+                    android:textSize="9sp" />
             </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- ===================== TOOLS: TIKTOK ===================== -->
+        <LinearLayout
+            android:id="@+id/layoutToolsTikTok"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:background="@drawable/bg_scene_card"
+            android:padding="8dp"
+            android:layout_marginTop="4dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/toolAddTikTokChat"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddTikTokChat"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/ic_menu_send"
+                    android:padding="8dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah TikTok Chat" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Chat"
+                    android:textColor="#AAA"
+                    android:textSize="9sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/toolAddTikTokGift"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddTikTokGift"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/btn_star_big_on"
+                    android:padding="8dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah TikTok Gift" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Gift"
+                    android:textColor="#AAA"
+                    android:textSize="9sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/toolAddTikTokJoin"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:gravity="center"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?attr/selectableItemBackgroundBorderless">
+                <ImageButton
+                    android:id="@+id/btnAddTikTokJoin"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="@android:color/transparent"
+                    android:src="@android:drawable/ic_menu_add"
+                    android:padding="8dp"
+                    app:tint="#7FD8A6"
+                    android:contentDescription="Tambah TikTok Join" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Join"
+                    android:textColor="#AAA"
+                    android:textSize="9sp" />
+            </LinearLayout>
+
+            <!-- Spacer biar gak terlalu renggang kalau cuma 3 -->
+            <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
 
         </LinearLayout>
 

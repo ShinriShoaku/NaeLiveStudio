@@ -67,6 +67,18 @@ class EditorLayerAdapter(
                     ivTypeBadge.setImageResource(android.R.drawable.ic_menu_edit)
                     ivTypeBadge.visibility = View.VISIBLE
                 }
+                LayerType.TIKTOK_CHAT -> {
+                    ivTypeBadge.setImageResource(android.R.drawable.ic_menu_send)
+                    ivTypeBadge.visibility = View.VISIBLE
+                }
+                LayerType.TIKTOK_GIFT -> {
+                    ivTypeBadge.setImageResource(android.R.drawable.btn_star_big_on)
+                    ivTypeBadge.visibility = View.VISIBLE
+                }
+                LayerType.TIKTOK_JOIN -> {
+                    ivTypeBadge.setImageResource(android.R.drawable.ic_menu_add)
+                    ivTypeBadge.visibility = View.VISIBLE
+                }
                 else -> ivTypeBadge.visibility = View.GONE
             }
 

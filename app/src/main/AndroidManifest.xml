@@ -9,6 +9,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <queries>
+        <package android:name="ame.project.kanae" />
+        <intent>
+            <action android:name="ame.project.kanae.IKanaeService" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -31,6 +38,7 @@
             </intent-filter>
         </activity>
         <activity android:name=".VoiceAnimSettingsActivity" />
+        <activity android:name="ame.project.nlsdk.KanaeActivity" />
         <service
             android:name=".OBS.StreamService"
             android:exported="false"

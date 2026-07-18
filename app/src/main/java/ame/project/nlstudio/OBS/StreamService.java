@@ -13,6 +13,11 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Rect;
+import android.graphics.PixelFormat;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaRecorder;
 import android.media.projection.MediaProjection;
@@ -21,8 +26,10 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -33,7 +40,6 @@ import com.pedro.common.ConnectChecker;
 import com.pedro.encoder.input.sources.audio.MicrophoneSource;
 import com.pedro.encoder.input.sources.audio.MixAudioSource;
 import com.pedro.encoder.utils.gl.AspectRatioMode;
-import com.pedro.encoder.input.sources.video.ScreenSource;
 import com.pedro.encoder.utils.CodecUtil;
 import com.pedro.encoder.utils.ViewPort;
 import com.pedro.library.rtmp.RtmpStream;
@@ -71,6 +77,21 @@ import java.util.Locale;
 public class StreamService extends Service implements ConnectChecker {
 
     private static final String TAG = "RES-SVC";
+
+    private static StreamService instance;
+    public static StreamService getInstance() { return instance; }
+
+    // Global Screen Capture (Android 14 fix)
+    // Di Android 14+, satu MediaProjection hanya bisa dipakai createVirtualDisplay satu kali.
+    // Jika kita ganti scene dengan membuat VideoSource baru yang panggil createVirtualDisplay lagi,
+    // maka akan gagal (SecurityException). Solusinya: capture layar secara global di Service ini
+    // satu kali saja, lalu hasilnya (Bitmap) dibagikan ke scene manapun yang butuh.
+    private VirtualDisplay globalVirtualDisplay;
+    private ImageReader globalImageReader;
+    private HandlerThread globalScreenThread;
+    private Bitmap globalScreenBitmap;
+    private final Object globalScreenLock = new Object();
+    private int globalCapW, globalCapH;
 
     /**
      * Diagnostik pakai reflection: dump semua method getter yang namanya mengandung
@@ -162,12 +183,12 @@ public class StreamService extends Service implements ConnectChecker {
     }
 
 
-    public static final String ACTION_START = "com.example.tiktoklive.START";
-    public static final String ACTION_STOP = "com.example.tiktoklive.STOP";
-    public static final String ACTION_TEST_RECORD = "com.example.tiktoklive.TEST_RECORD";
-    public static final String ACTION_SWITCH_SCENE = "com.example.tiktoklive.SWITCH_SCENE";
-    public static final String ACTION_UPDATE_AUDIO_GAIN = "com.example.tiktoklive.UPDATE_AUDIO_GAIN";
-    public static final String ACTION_STATUS_BROADCAST = "com.example.tiktoklive.STATUS_BROADCAST";
+    public static final String ACTION_START = "ame.project.tiktoklive.START";
+    public static final String ACTION_STOP = "ame.project.tiktoklive.STOP";
+    public static final String ACTION_TEST_RECORD = "ame.project.tiktoklive.TEST_RECORD";
+    public static final String ACTION_SWITCH_SCENE = "ame.project.tiktoklive.SWITCH_SCENE";
+    public static final String ACTION_UPDATE_AUDIO_GAIN = "ame.project.tiktoklive.UPDATE_AUDIO_GAIN";
+    public static final String ACTION_STATUS_BROADCAST = "ame.project.tiktoklive.STATUS_BROADCAST";
     public static final String EXTRA_STATUS_MSG = "statusMsg";
 
     public static final String EXTRA_RESULT_CODE = "resultCode";
@@ -228,12 +249,190 @@ public class StreamService extends Service implements ConnectChecker {
     // terakhirnya sesaat sebelum diganti scene lain (bahan efek fade/cross-dissolve).
     private volatile com.pedro.encoder.input.sources.video.VideoSource currentSceneSource;
 
+    private static final String KANAE_SERVICE_PACKAGE = "ame.project.kanae";
+    private static final String KANAE_SERVICE_ACTION = "ame.project.kanae.AIDL_SERVICE";
+
+    private ame.project.nlsdk.IKanaeService kanaeService;
+    private volatile boolean kanaeBound = false;
+
+    private final android.content.ServiceConnection kanaeConnection = new android.content.ServiceConnection() {
+        @Override
+        public void onServiceConnected(android.content.ComponentName name, IBinder service) {
+            kanaeService = ame.project.nlsdk.IKanaeService.Stub.asInterface(service);
+            kanaeBound = true;
+            try {
+                kanaeService.registerCallback(kanaeCallback);
+                Log.d(TAG, "Kanae service terhubung, callback TikTok terdaftar");
+            } catch (Exception e) {
+                Log.e(TAG, "Gagal registerCallback ke Kanae", e);
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(android.content.ComponentName name) {
+            Log.d(TAG, "Kanae service terputus");
+            kanaeService = null;
+            kanaeBound = false;
+        }
+    };
+
+    private final ame.project.nlsdk.IKanaeCallback.Stub kanaeCallback = new ame.project.nlsdk.IKanaeCallback.Stub() {
+        @Override
+        public void onTrackChanged(String title, String artist, String duration, String thumbnail) { }
+
+        @Override
+        public void onLyricsChanged(String lyrics) { }
+
+        @Override
+        public void onQueueChanged(String queueJson) { }
+
+        @Override
+        public void onPlaybackStatusChanged(boolean isPlaying, long position, long duration) { }
+
+        @Override
+        public void onChatMessage(String user, String message) {
+            TikTokChatBus.getInstance().onChatMessage(user, message);
+        }
+
+        @Override
+        public void onGiftMessage(String user, String gift, String giftUrl, int count) {
+            TikTokChatBus.getInstance().onGiftMessage(user, gift, giftUrl, count);
+        }
+
+        @Override
+        public void onTikTokStatus(boolean connected, String username) {
+            TikTokChatBus.getInstance().setConnectionStatus(connected, username);
+        }
+
+        @Override
+        public void onUserJoined(String user, String profileUrl) {
+            TikTokChatBus.getInstance().onUserJoined(user, profileUrl);
+        }
+
+        @Override
+        public void onUserLiked(String user, String profileUrl, int count) {
+            TikTokChatBus.getInstance().onUserLiked(user, profileUrl, count);
+        }
+
+        @Override
+        public void onUserFollowed(String user, String profileUrl) {
+            TikTokChatBus.getInstance().onUserFollowed(user, profileUrl);
+        }
+
+        @Override
+        public void onUserShared(String user, String profileUrl) {
+            TikTokChatBus.getInstance().onUserShared(user, profileUrl);
+        }
+    };
+
+    private void bindKanaeService() {
+        if (kanaeBound) return;
+        try {
+            Intent intent = new Intent(KANAE_SERVICE_ACTION);
+            intent.setPackage(KANAE_SERVICE_PACKAGE);
+            boolean ok = bindService(intent, kanaeConnection, Context.BIND_AUTO_CREATE);
+            Log.d(TAG, "bindKanaeService: bindService() = " + ok);
+        } catch (Exception e) {
+            Log.e(TAG, "bindKanaeService gagal", e);
+        }
+    }
+
+    private void unbindKanaeService() {
+        if (!kanaeBound) return;
+        try {
+            if (kanaeService != null) kanaeService.unregisterCallback(kanaeCallback);
+        } catch (Exception ignored) {
+        }
+        try {
+            unbindService(kanaeConnection);
+        } catch (Exception ignored) {
+        }
+        kanaeService = null;
+        kanaeBound = false;
+    }
+
+    private void startGlobalScreenCapture(MediaProjection mp) {
+        if (globalVirtualDisplay != null) return;
+        Log.d(TAG, "startGlobalScreenCapture: initializing VirtualDisplay for Android 14+");
+
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int screenW = metrics.widthPixels;
+        int screenH = metrics.heightPixels;
+
+        float designRatio = (float) savedWidth / savedHeight;
+        float screenRatio = (float) screenW / screenH;
+
+        if (screenRatio > designRatio) {
+            globalCapW = savedWidth;
+            globalCapH = Math.round(savedWidth / screenRatio);
+        } else {
+            globalCapH = savedHeight;
+            globalCapW = Math.round(savedHeight * screenRatio);
+        }
+
+        globalScreenThread = new HandlerThread("GlobalScreenCap");
+        globalScreenThread.start();
+        Handler handler = new Handler(globalScreenThread.getLooper());
+
+        globalImageReader = ImageReader.newInstance(globalCapW, globalCapH, PixelFormat.RGBA_8888, 2);
+        globalVirtualDisplay = mp.createVirtualDisplay("GlobalScreen",
+                globalCapW, globalCapH, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                globalImageReader.getSurface(), null, new Handler(Looper.getMainLooper()));
+
+        globalImageReader.setOnImageAvailableListener(reader -> {
+            try {
+                Image image = reader.acquireLatestImage();
+                if (image != null) {
+                    updateGlobalScreenBitmap(image);
+                    image.close();
+                }
+            } catch (Exception ignored) {}
+        }, handler);
+    }
+
+    private void updateGlobalScreenBitmap(Image image) {
+        try {
+            Image.Plane[] planes = image.getPlanes();
+            java.nio.ByteBuffer buffer = planes[0].getBuffer();
+            int pixelStride = planes[0].getPixelStride();
+            int rowStride = planes[0].getRowStride();
+            int rowPadding = rowStride - pixelStride * image.getWidth();
+            int bitmapWidth = image.getWidth() + rowPadding / pixelStride;
+
+            synchronized (globalScreenLock) {
+                if (globalScreenBitmap == null || globalScreenBitmap.getWidth() != bitmapWidth || globalScreenBitmap.getHeight() != image.getHeight()) {
+                    if (globalScreenBitmap != null) globalScreenBitmap.recycle();
+                    globalScreenBitmap = Bitmap.createBitmap(bitmapWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
+                }
+                buffer.rewind();
+                globalScreenBitmap.copyPixelsFromBuffer(buffer);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "updateGlobalScreenBitmap error", e);
+        }
+    }
+
+    public Bitmap getGlobalScreenFrame() {
+        synchronized (globalScreenLock) {
+            if (globalScreenBitmap == null || globalScreenBitmap.isRecycled()) return null;
+            return globalScreenBitmap;
+        }
+    }
+
+    public Object getGlobalScreenLock() { return globalScreenLock; }
+    public int getGlobalCapW() { return globalCapW; }
+    public int getGlobalCapH() { return globalCapH; }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         isServiceRunning = true;
         rtmpStream = new RtmpStream(this, this);
         AudioLevelBus.registerListener(audioLevelListener);
+        TikTokChatBus.getInstance().reset();
+        bindKanaeService();
     }
 
     private final AudioLevelBus.Listener audioLevelListener = new AudioLevelBus.Listener() {
@@ -345,6 +544,11 @@ public class StreamService extends Service implements ConnectChecker {
                     + savedWidth + "x" + savedHeight + " (orientation="
                     + (savedWidth > savedHeight ? "LANDSCAPE" : "PORTRAIT") + ")");
 
+            // FIX SMOOTHNESS: mulai pre-warm cache video background SEMUA scene di sini, sebelum
+            // user sempat pindah scene sama sekali - lihat komentar lengkap di
+            // prewarmAllVideoBackgroundCaches().
+            prewarmAllVideoBackgroundCaches();
+
             if (ACTION_START.equals(action)) {
                 String rtmpUrl = intent.getStringExtra(EXTRA_RTMP_URL);
                 startStreaming(resultCode, data, rtmpUrl, width, height, fps, vBitrate, aBitrate,
@@ -421,6 +625,7 @@ public class StreamService extends Service implements ConnectChecker {
             return;
         }
         savedMediaProjection = mediaProjection;
+        startGlobalScreenCapture(mediaProjection);
 
         applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
 
@@ -430,14 +635,10 @@ public class StreamService extends Service implements ConnectChecker {
             try {
                 applyCompositeScene(initialSceneJson, null);
             } catch (Exception e) {
-                ScreenSource fallback = new ScreenSource(this, mediaProjection);
-                rtmpStream.changeVideoSource(fallback);
-                currentSceneSource = fallback;
+                applyInitialScreenSource(null);
             }
         } else {
-            ScreenSource initial = new ScreenSource(this, mediaProjection);
-            rtmpStream.changeVideoSource(initial);
-            currentSceneSource = initial;
+            applyInitialScreenSource(null);
         }
 
         // FIX: Panggil properti GL SETELAH changeVideoSource agar tidak ter-reset
@@ -501,6 +702,70 @@ public class StreamService extends Service implements ConnectChecker {
      * bikin decoder, DAN changeVideoSource() itu sendiri) dipindah ke sceneSwitchExecutor
      * (single background thread, urut - tidak akan ada 2 switch tumpang tindih).
      */
+    /**
+     * FIX SMOOTHNESS: Sebelumnya video background baru mulai di-decode & di-cache begitu user
+     * PINDAH ke scene itu (lihat prefetch() di applyCompositeScene()) - jadi switch PERTAMA KALI
+     * ke scene video selalu kena live-decode dulu (real-time, lebih berat di CPU/GPU & baterai),
+     * baru pindah ke cache setelah beberapa detik decode selesai di background.
+     *
+     * Sekarang, begitu savedWidth/Height/Fps sudah pasti (live/record baru mulai), kita langsung
+     * mulai prefetch SEMUA scene composite yang backgroundnya VIDEO, satu per satu (BUKAN paralel
+     * - hardware video decoder di banyak device Android cuma bisa beberapa instance sekaligus,
+     * paralel bisa gagal/rebutan resource). Jadi begitu user beneran pindah ke scene video itu
+     * nanti, cache-nya sudah siap (atau paling tidak sedang jalan lebih dulu) - transisinya jauh
+     * lebih mulus, tidak perlu nunggu decode real-time dari nol tiap kali ganti scene.
+     *
+     * VideoCacheManager sendiri sudah punya budget memori TOTAL (400MB gabungan semua URI) dan
+     * budget per-video (250MB / maks ~20 detik) - jadi aman dipanggil untuk semua scene sekaligus,
+     * kalau kepanjangan/kebanyakan otomatis fallback ke live-streaming utk video yang tidak
+     * kebagian budget, tidak bikin OOM.
+     */
+    private void prewarmAllVideoBackgroundCaches() {
+        new Thread(() -> {
+            try {
+                List<ame.project.nlstudio.scene.Scene> scenes =
+                        new ame.project.nlstudio.scene.SceneRepository(this).loadScenes();
+                List<Uri> videoUris = new ArrayList<>();
+                for (ame.project.nlstudio.scene.Scene scene : scenes) {
+                    if (scene.getBackgroundType() == ame.project.nlstudio.scene.BackgroundType.VIDEO
+                            && scene.getBackgroundUri() != null) {
+                        Uri uri = Uri.parse(scene.getBackgroundUri());
+                        if (!videoUris.contains(uri)) videoUris.add(uri);
+                    }
+                }
+                if (!videoUris.isEmpty()) {
+                    Log.d(TAG, "prewarmAllVideoBackgroundCaches: " + videoUris.size() + " video scene ditemukan, mulai prefetch berurutan");
+                    prewarmNext(videoUris, 0);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "prewarmAllVideoBackgroundCaches gagal", e);
+            }
+        }, "PrewarmVideoCache").start();
+    }
+
+    private void prewarmNext(List<Uri> uris, int index) {
+        if (index >= uris.size() || !isServiceRunning) return;
+        Uri uri = uris.get(index);
+
+        if (VideoCacheManager.getInstance().isCached(uri)) {
+            prewarmNext(uris, index + 1);
+            return;
+        }
+
+        Log.d(TAG, "prewarmNext: prefetch (" + (index + 1) + "/" + uris.size() + ") " + uri);
+        VideoCacheManager.getInstance().prefetch(this, uri, savedWidth, savedHeight, savedFps,
+                250L * 1024 * 1024, new VideoCacheManager.ProgressListener() {
+                    @Override
+                    public void onProgress(int frames) { }
+
+                    @Override
+                    public void onComplete() {
+                        Log.d(TAG, "prewarmNext: selesai/berhenti utk " + uri + ", lanjut berikutnya");
+                        prewarmNext(uris, index + 1);
+                    }
+                });
+    }
+
     private void switchScene(String scene, Uri uri, String sceneJson) {
         Log.d(TAG, "switchScene: scene=" + scene + " uri=" + uri
                 + " sceneJson=" + sceneJson + " savedWidth/Height="
@@ -514,9 +779,18 @@ public class StreamService extends Service implements ConnectChecker {
         sceneSwitchExecutor.execute(() -> {
             try {
                 if (SCENE_SCREEN.equals(scene)) {
-                    ScreenSource source = new ScreenSource(this, savedMediaProjection);
-                    // ScreenSource bawaan RootEncoder tidak mendukung snapshot/fade (lihat
-                    // SceneCrossfadeSupport) - tetap "cut" langsung, tapi tidak lagi memblokir UI.
+                    // Fix Android 14: Jangan pakai ScreenSource (library) yang mencoba buat VirtualDisplay baru.
+                    // Sebagai gantinya, gunakan CompositeSceneVideoSource dengan satu layer SCREEN yang
+                    // mengambil frame dari VirtualDisplay global.
+                    List<CompositeSceneVideoSource.Layer> layers = new ArrayList<>();
+                    layers.add(new CompositeSceneVideoSource.Layer(
+                            null, "", ame.project.nlstudio.scene.LayerType.SCREEN,
+                            0f, 0f, 1f, 1f, 0
+                    ));
+                    CompositeSceneVideoSource source = new CompositeSceneVideoSource(
+                            this, CompositeSceneVideoSource.BackgroundType.COLOR,
+                            null, null, layers, savedWidth, savedHeight);
+                    source.setFadeFromSnapshot(fadeSnapshot);
                     rtmpStream.changeVideoSource(source);
                     currentSceneSource = source;
                     updateInternalAudioMuteState(true);
@@ -653,11 +927,19 @@ public class StreamService extends Service implements ConnectChecker {
                         String firstUri = vaConfig.getItems().get(0).getImageUri();
                         if (!firstUri.isEmpty()) bmp = vaBitmaps.get(firstUri);
                     }
+                } else if ("TIKTOK_CHAT".equals(layerType) || "TIKTOK_GIFT".equals(layerType) || "TIKTOK_JOIN".equals(layerType)) {
+                    // FIX: dulu di sini digambar bitmap placeholder statis sekali ("CHAT"/"GIFT"/
+                    // "JOIN") yang tidak pernah update. Sekarang bmp sengaja dibiarkan null -
+                    // CompositeSceneVideoSource.drawLayers() yang re-render overlay ini TIAP FRAME
+                    // langsung dari data live TikTokChatBus (diisi lewat binding ke IKanaeService
+                    // di bawah), jadi chat/gift/join yang masuk beneran muncul di hasil record.
                 } else if (!"SCREEN".equals(layerType)) {
                     bmp = loadBitmapPreserveAspect(layerUri);
                 }
 
-                if (bmp == null && !"SCREEN".equals(layerType) && !"VOICE_ANIM".equals(layerType)) continue;
+                if (bmp == null && !"SCREEN".equals(layerType) && !"VOICE_ANIM".equals(layerType)
+                        && !"TIKTOK_CHAT".equals(layerType) && !"TIKTOK_GIFT".equals(layerType)
+                        && !"TIKTOK_JOIN".equals(layerType)) continue;
 
                 CompositeSceneVideoSource.Layer layer = new CompositeSceneVideoSource.Layer(
                         bmp,
@@ -689,7 +971,6 @@ public class StreamService extends Service implements ConnectChecker {
 
         CompositeSceneVideoSource source = new CompositeSceneVideoSource(
                 this, bgType, backgroundImage, backgroundVideoUri, layers, rootW, rootH);
-        source.setMediaProjection(savedMediaProjection);
         source.setFadeFromSnapshot(fadeSnapshot);
         rtmpStream.changeVideoSource(source);
         currentSceneSource = source;
@@ -802,6 +1083,7 @@ public class StreamService extends Service implements ConnectChecker {
             return;
         }
         savedMediaProjection = mediaProjection;
+        startGlobalScreenCapture(mediaProjection);
 
         applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
 
@@ -809,14 +1091,10 @@ public class StreamService extends Service implements ConnectChecker {
             try {
                 applyCompositeScene(initialSceneJson, null);
             } catch (Exception e) {
-                ScreenSource fallback = new ScreenSource(this, mediaProjection);
-                rtmpStream.changeVideoSource(fallback);
-                currentSceneSource = fallback;
+                applyInitialScreenSource(null);
             }
         } else {
-            ScreenSource initial = new ScreenSource(this, mediaProjection);
-            rtmpStream.changeVideoSource(initial);
-            currentSceneSource = initial;
+            applyInitialScreenSource(null);
         }
 
         applyGlProperties();
@@ -882,6 +1160,20 @@ public class StreamService extends Service implements ConnectChecker {
     }
 
     // ==================== HELPER BERSAMA ====================
+
+    private void applyInitialScreenSource(Bitmap fadeSnapshot) {
+        List<CompositeSceneVideoSource.Layer> layers = new ArrayList<>();
+        layers.add(new CompositeSceneVideoSource.Layer(
+                null, "", ame.project.nlstudio.scene.LayerType.SCREEN,
+                0f, 0f, 1f, 1f, 0
+        ));
+        CompositeSceneVideoSource source = new CompositeSceneVideoSource(
+                this, CompositeSceneVideoSource.BackgroundType.COLOR,
+                null, null, layers, savedWidth, savedHeight);
+        source.setFadeFromSnapshot(fadeSnapshot);
+        rtmpStream.changeVideoSource(source);
+        currentSceneSource = source;
+    }
 
     private void applyEncoderType(int encoderType) {
         if (encoderType == 1) {
@@ -999,6 +1291,25 @@ public class StreamService extends Service implements ConnectChecker {
             audioMixSource = null;
         }
         currentSceneSource = null;
+        if (globalVirtualDisplay != null) {
+            globalVirtualDisplay.release();
+            globalVirtualDisplay = null;
+        }
+        if (globalImageReader != null) {
+            globalImageReader.close();
+            globalImageReader = null;
+        }
+        if (globalScreenThread != null) {
+            globalScreenThread.quitSafely();
+            globalScreenThread = null;
+        }
+        synchronized (globalScreenLock) {
+            if (globalScreenBitmap != null) {
+                globalScreenBitmap.recycle();
+                globalScreenBitmap = null;
+            }
+        }
+
         if (savedMediaProjection != null) {
             try {
                 savedMediaProjection.stop();
@@ -1017,8 +1328,15 @@ public class StreamService extends Service implements ConnectChecker {
     public void onDestroy() {
         stopEverything();
         isServiceRunning = false;
+        instance = null;
         sceneSwitchExecutor.shutdownNow();
         AudioLevelBus.unregisterListener(audioLevelListener);
+        unbindKanaeService();
+        TikTokChatBus.getInstance().reset();
+        // FIX MEMORI: sekarang prewarmAllVideoBackgroundCaches() lebih agresif ngisi cache (semua
+        // scene video, bukan cuma yang lagi dipakai) - bersihkan begitu live/record selesai supaya
+        // RAM-nya tidak nyangkut kepakai terus selama proses app masih hidup di background.
+        VideoCacheManager.getInstance().clearAll();
         super.onDestroy();
     }
 

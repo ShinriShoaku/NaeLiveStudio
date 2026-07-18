@@ -5,20 +5,10 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
-import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
-import android.media.Image;
-import android.media.ImageReader;
-import android.media.projection.MediaProjection;
 import android.net.Uri;
-import android.os.Handler;
-import android.os.HandlerThread;
-import android.os.Looper;
-import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Surface;
 
@@ -26,7 +16,6 @@ import androidx.annotation.NonNull;
 
 import com.pedro.encoder.input.sources.video.VideoSource;
 
-import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -78,13 +67,9 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     private final Uri backgroundVideoUri;
     private final List<Layer> layers;
 
-    private MediaProjection mediaProjection;
-    private VirtualDisplay virtualDisplay;
-    private ImageReader imageReader;
-    private HandlerThread screenCaptureThread;
-    private Bitmap reusableScreenBitmap;
-    private volatile Bitmap currentScreenFrame;
-    private final Object screenLock = new Object();
+    // REMOVED internal screen capture for Android 14+ compatibility.
+    // Screen capture is now managed globally by StreamService to avoid
+    // recreating VirtualDisplay when switching scenes.
 
     private Surface targetSurface;
     private Thread drawThread;
@@ -156,16 +141,6 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         Log.d(TAG, "Constructor: Forced VideoSource resolution to " + width + "x" + height);
     }
 
-    public void setMediaProjection(MediaProjection mp) {
-        this.mediaProjection = mp;
-    }
-
-    public void setResolution(int width, int height) {
-        this.designWidth = width;
-        this.designHeight = height;
-        Log.d(TAG, "setResolution() dipanggil dari StreamService: designWidth/Height = " + width + "x" + height);
-    }
-
     public void setMicLevel(float level) {
         this.micLevel = level;
     }
@@ -206,93 +181,10 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         this.targetSurface = new Surface(surfaceTexture);
         running = true;
 
-        boolean hasScreenLayer = false;
-        for (Layer l : layers) {
-            if (l.type == LayerType.SCREEN) {
-                hasScreenLayer = true;
-                break;
-            }
-        }
-
-        if (hasScreenLayer && mediaProjection != null) {
-            startScreenCapture();
-        }
-
         if (backgroundType == BackgroundType.VIDEO && backgroundVideoUri != null) {
             startVideoBackgroundLoop();
         }
         startCompositeDrawLoop();
-    }
-
-    private int capW, capH;
-
-    private void startScreenCapture() {
-        screenCaptureThread = new HandlerThread("ScreenCapture");
-        screenCaptureThread.start();
-        Handler handler = new Handler(screenCaptureThread.getLooper());
-
-        // Gunakan resolusi layar asli agar capture tidak ter-scale/pillarbox di dalam VirtualDisplay
-        DisplayMetrics metrics = context.getResources().getDisplayMetrics();
-        int screenW = metrics.widthPixels;
-        int screenH = metrics.heightPixels;
-
-        // Kita gunakan width/height design sebagai limit resolusi capture agar tidak terlalu berat,
-        // tapi tetap mengikuti aspek rasio HP asli.
-        float designRatio = (float) designWidth / designHeight;
-        float screenRatio = (float) screenW / screenH;
-
-        if (screenRatio > designRatio) { // Screen is wider
-            capW = designWidth;
-            capH = Math.round(designWidth / screenRatio);
-        } else {
-            capH = designHeight;
-            capW = Math.round(designHeight * screenRatio);
-        }
-
-        Log.d(TAG, "startScreenCapture(): screenW/H(live displayMetrics)=" + screenW + "x" + screenH
-                + " designWidth/Height(scene)=" + designWidth + "x" + designHeight
-                + " -> capW/H=" + capW + "x" + capH);
-
-        imageReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
-        // FIX: Gunakan Main Looper untuk internal callback MediaProjection agar tidak crash
-        // "sending message to a Handler on a dead thread" saat scene diganti/berhenti.
-        // ImageReader tetap pakai background handler agar tidak membebani UI.
-        virtualDisplay = mediaProjection.createVirtualDisplay("CompositeScreen",
-                capW, capH, metrics.densityDpi, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader.getSurface(), null, new Handler(Looper.getMainLooper()));
-
-        imageReader.setOnImageAvailableListener(reader -> {
-            try {
-                Image image = reader.acquireLatestImage();
-                if (image != null) {
-                    synchronized (screenLock) {
-                        updateScreenBitmap(image);
-                    }
-                    image.close();
-                }
-            } catch (Exception ignored) {}
-        }, handler);
-    }
-
-    private void updateScreenBitmap(Image image) {
-        try {
-            Image.Plane[] planes = image.getPlanes();
-            ByteBuffer buffer = planes[0].getBuffer();
-            int pixelStride = planes[0].getPixelStride();
-            int rowStride = planes[0].getRowStride();
-            int rowPadding = rowStride - pixelStride * image.getWidth();
-            int bitmapWidth = image.getWidth() + rowPadding / pixelStride;
-
-            if (reusableScreenBitmap == null || reusableScreenBitmap.getWidth() != bitmapWidth || reusableScreenBitmap.getHeight() != image.getHeight()) {
-                if (reusableScreenBitmap != null) reusableScreenBitmap.recycle();
-                reusableScreenBitmap = Bitmap.createBitmap(bitmapWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
-            }
-            buffer.rewind();
-            reusableScreenBitmap.copyPixelsFromBuffer(buffer);
-            currentScreenFrame = reusableScreenBitmap;
-        } catch (Exception e) {
-            Log.e(TAG, "updateScreenBitmap error", e);
-        }
     }
 
     @Override
@@ -312,28 +204,6 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
         synchronized (videoBgLock) {
             currentVideoBgFrame = null;
-        }
-
-        if (virtualDisplay != null) {
-            virtualDisplay.release();
-            virtualDisplay = null;
-        }
-        if (imageReader != null) {
-            imageReader.setOnImageAvailableListener(null, null);
-            imageReader.close();
-            imageReader = null;
-        }
-        if (screenCaptureThread != null) {
-            screenCaptureThread.quitSafely();
-            screenCaptureThread = null;
-        }
-
-        synchronized (screenLock) {
-            if (reusableScreenBitmap != null) {
-                reusableScreenBitmap.recycle();
-                reusableScreenBitmap = null;
-            }
-            currentScreenFrame = null;
         }
 
         drawThread = null;
@@ -633,6 +503,9 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             Bitmap bmp = layer.bitmap;
             boolean isScreen = layer.type == LayerType.SCREEN;
             boolean isVoiceAnim = layer.type == LayerType.VOICE_ANIM;
+            boolean isTikTokChat = layer.type == LayerType.TIKTOK_CHAT;
+            boolean isTikTokGift = layer.type == LayerType.TIKTOK_GIFT;
+            boolean isTikTokJoin = layer.type == LayerType.TIKTOK_JOIN;
 
             RectF dst = new RectF(
                     layer.x * cW,
@@ -641,16 +514,43 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                     (layer.y + layer.h) * cH
             );
 
+            // FIX: dulu ketiga tipe ini jatuh ke default di bawah dan cuma gambar bitmap
+            // placeholder statis ("CHAT"/"GIFT"/"JOIN") yang dibuat SEKALI di StreamService saat
+            // scene JSON di-parse - tidak pernah update walau ada chat/gift/join baru masuk lewat
+            // IKanaeCallback. Sekarang di-render ULANG TIAP FRAME dari data live yang ditampung
+            // TikTokChatBus (diisi StreamService lewat binding ke IKanaeService), mirip pola
+            // layer SCREEN yang ambil globalScreenFrame tiap frame.
+            if (isTikTokChat || isTikTokGift || isTikTokJoin) {
+                int lw = Math.max(1, Math.round(dst.width()));
+                int lh = Math.max(1, Math.round(dst.height()));
+                if (isTikTokChat) {
+                    bmp = TikTokChatBus.getInstance().renderChatOverlay(context, lw, lh);
+                } else if (isTikTokGift) {
+                    bmp = TikTokChatBus.getInstance().renderGiftOverlay(context, lw, lh);
+                } else if (isTikTokJoin) {
+                    bmp = TikTokChatBus.getInstance().renderJoinOverlay(context, lw, lh);
+                }
+                if (bmp != null && !bmp.isRecycled()) {
+                    canvas.drawBitmap(bmp, null, dst, paint);
+                }
+                continue;
+            }
+
             if (isScreen) {
-                synchronized (screenLock) {
-                    bmp = currentScreenFrame;
-                    if (bmp != null && !bmp.isRecycled()) {
-                        Rect srcRect = new Rect(0, 0, capW, capH);
-                        RectF cropDst = fillRectF(capW, capH, dst);
-                        canvas.save();
-                        canvas.clipRect(dst);
-                        canvas.drawBitmap(bmp, srcRect, cropDst, paint);
-                        canvas.restore();
+                StreamService svc = StreamService.getInstance();
+                if (svc != null) {
+                    synchronized (svc.getGlobalScreenLock()) {
+                        bmp = svc.getGlobalScreenFrame();
+                        if (bmp != null && !bmp.isRecycled()) {
+                            int sCapW = svc.getGlobalCapW();
+                            int sCapH = svc.getGlobalCapH();
+                            Rect srcRect = new Rect(0, 0, sCapW, sCapH);
+                            RectF cropDst = fillRectF(sCapW, sCapH, dst);
+                            canvas.save();
+                            canvas.clipRect(dst);
+                            canvas.drawBitmap(bmp, srcRect, cropDst, paint);
+                            canvas.restore();
+                        }
                     }
                 }
                 continue;
@@ -698,13 +598,13 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             if (bmp != null && !bmp.isRecycled()) {
                 canvas.drawBitmap(bmp, null, dst, paint);
             }
-            
+
             // Reset filter for next layers
             paint.setColorFilter(null);
         }
     }
 
-    /** Center Crop logic untuk layer: memotong sisi agar gambar memenuhi area tujuan tanpa distorsi. */
+    /** Center Crop logic for layer: memotong sisi agar gambar memenuhi area tujuan tanpa distorsi. */
     private RectF fillRectF(int srcW, int srcH, RectF dst) {
         float scale = Math.max(dst.width() / srcW, dst.height() / srcH);
         float w = srcW * scale;

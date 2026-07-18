@@ -25,3 +25,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "NL Studio"
 include ':app'
+include ':nlstudio-sdk'

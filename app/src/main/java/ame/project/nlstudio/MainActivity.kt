@@ -11,6 +11,7 @@ import ame.project.nlstudio.scene.SceneLayer
 import ame.project.nlstudio.scene.SceneRepository
 import ame.project.nlstudio.ui.SceneCanvasView
 import ame.project.nlstudio.ui.VuMeterView
+import ame.project.nlsdk.KanaeActivity
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -72,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     // Top Bar UI
     private lateinit var btnSettings: android.widget.ImageButton
     private lateinit var btnVoiceAnim: android.widget.ImageButton
+    private lateinit var btnKanae: android.widget.ImageButton
     private lateinit var btnQuickLive: android.widget.ImageButton
     private lateinit var btnSceneManager: android.widget.ImageButton
     private lateinit var tvSceneNameTitle: TextView
@@ -119,10 +121,18 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnAddImage: android.widget.ImageButton
     private lateinit var btnAddText: android.widget.ImageButton
     private lateinit var btnAddVoiceAnim: android.widget.ImageButton
+    private lateinit var btnAddTikTokChat: android.widget.ImageButton
+    private lateinit var btnAddTikTokGift: android.widget.ImageButton
+    private lateinit var btnAddTikTokJoin: android.widget.ImageButton
     private lateinit var btnBgPicker: android.widget.ImageButton
     private lateinit var btnSaveSceneMain: Button
     private lateinit var viewPager: androidx.viewpager2.widget.ViewPager2
     private lateinit var tabLayout: com.google.android.material.tabs.TabLayout
+
+    // Editor Tool Tabs
+    private var tabEditorTools: com.google.android.material.tabs.TabLayout? = null
+    private var layoutToolsGeneral: View? = null
+    private var layoutToolsTikTok: View? = null
 
     // Layer strip (klik utk pilih layer, X utk hapus - lihat EditorLayerAdapter)
     private var rvLayerStrip: RecyclerView? = null
@@ -333,6 +343,7 @@ class MainActivity : AppCompatActivity() {
 
         btnSettings = findViewById(R.id.btnSettings)
         btnVoiceAnim = findViewById(R.id.btnVoiceAnim)
+        btnKanae = findViewById(R.id.btnKanae)
         btnQuickLive = findViewById(R.id.btnQuickLive)
         btnSceneManager = findViewById(R.id.btnSceneManager)
         tvSceneNameTitle = findViewById(R.id.tvSceneNameTitle)
@@ -372,6 +383,10 @@ class MainActivity : AppCompatActivity() {
         btnVoiceAnim.setOnClickListener {
             // Open Voice Animation Settings Activity
             val intent = Intent(this, VoiceAnimSettingsActivity::class.java)
+            startActivity(intent)
+        }
+        btnKanae.setOnClickListener {
+            val intent = Intent(this, KanaeActivity::class.java)
             startActivity(intent)
         }
         btnQuickLive.setOnClickListener { findViewById<Button>(R.id.btnStart).performClick() }
@@ -475,8 +490,15 @@ class MainActivity : AppCompatActivity() {
         btnAddImage = root.findViewById(R.id.btnAddImage)
         btnAddText = root.findViewById(R.id.btnAddText)
         btnAddVoiceAnim = root.findViewById(R.id.btnAddVoiceAnim)
+        btnAddTikTokChat = root.findViewById(R.id.btnAddTikTokChat)
+        btnAddTikTokGift = root.findViewById(R.id.btnAddTikTokGift)
+        btnAddTikTokJoin = root.findViewById(R.id.btnAddTikTokJoin)
         btnBgPicker = root.findViewById(R.id.btnBgPicker)
         btnSaveSceneMain = root.findViewById(R.id.btnSaveScene)
+
+        tabEditorTools = root.findViewById(R.id.tabEditorTools)
+        layoutToolsGeneral = root.findViewById(R.id.layoutToolsGeneral)
+        layoutToolsTikTok = root.findViewById(R.id.layoutToolsTikTok)
 
         rvLayerStrip = root.findViewById(R.id.rvLayerStrip)
         tvLayerCount = root.findViewById(R.id.tvLayerCount)
@@ -486,6 +508,8 @@ class MainActivity : AppCompatActivity() {
         btnPlayVideo = root.findViewById(R.id.btnPlayVideo)
         seekVideoProgress = root.findViewById(R.id.seekVideoProgress)
         cbLoopVideo = root.findViewById(R.id.cbLoopVideo)
+
+        setupEditorTabs()
 
         editorLayerAdapter = EditorLayerAdapter(
             bitmapLoader = { layer -> sceneRepository.loadLayerPreviewBitmap(layer) },
@@ -516,6 +540,9 @@ class MainActivity : AppCompatActivity() {
         btnAddImage.setOnClickListener { showAddLayerOptions() }
         btnAddText.setOnClickListener { showAddTextDialog() }
         btnAddVoiceAnim.setOnClickListener { showAddVoiceAnimOptions() }
+        btnAddTikTokChat.setOnClickListener { addTikTokChatLayer() }
+        btnAddTikTokGift.setOnClickListener { addTikTokGiftLayer() }
+        btnAddTikTokJoin.setOnClickListener { addTikTokJoinLayer() }
         btnBgPicker.setOnClickListener { showBackgroundPickerOptions() }
         btnSaveSceneMain.setOnClickListener { showSaveSceneDialog() }
 
@@ -625,6 +652,72 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun addTikTokChatLayer() {
+        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val newLayer = SceneLayer(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.TIKTOK_CHAT,
+            uri = "tiktok:chat",
+            x = 0.1f, y = 0.7f, w = 0.8f, h = 0.25f,
+            zIndex = nextZ
+        )
+        editingLayers.add(newLayer)
+        refreshCanvasLayers()
+        Toast.makeText(this, "TikTok Chat ditambahkan", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addTikTokGiftLayer() {
+        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val newLayer = SceneLayer(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.TIKTOK_GIFT,
+            uri = "tiktok:gift",
+            x = 0.1f, y = 0.1f, w = 0.8f, h = 0.25f,
+            zIndex = nextZ
+        )
+        editingLayers.add(newLayer)
+        refreshCanvasLayers()
+        Toast.makeText(this, "TikTok Gift ditambahkan", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun addTikTokJoinLayer() {
+        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
+        val newLayer = SceneLayer(
+            id = UUID.randomUUID().toString(),
+            type = LayerType.TIKTOK_JOIN,
+            uri = "tiktok:join",
+            x = 0.1f, y = 0.4f, w = 0.8f, h = 0.2f,
+            zIndex = nextZ
+        )
+        editingLayers.add(newLayer)
+        refreshCanvasLayers()
+        Toast.makeText(this, "TikTok Join ditambahkan", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun setupEditorTabs() {
+        tabEditorTools?.apply {
+            removeAllTabs()
+            addTab(newTab().setText("UMUM"))
+            addTab(newTab().setText("TIKTOK"))
+
+            addOnTabSelectedListener(object : com.google.android.material.tabs.TabLayout.OnTabSelectedListener {
+                override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab?) {
+                    when(tab?.position) {
+                        0 -> {
+                            layoutToolsGeneral?.visibility = View.VISIBLE
+                            layoutToolsTikTok?.visibility = View.GONE
+                        }
+                        1 -> {
+                            layoutToolsGeneral?.visibility = View.GONE
+                            layoutToolsTikTok?.visibility = View.VISIBLE
+                        }
+                    }
+                }
+                override fun onTabUnselected(tab: com.google.android.material.tabs.TabLayout.Tab?) {}
+                override fun onTabReselected(tab: com.google.android.material.tabs.TabLayout.Tab?) {}
+            })
+        }
+    }
     private fun addTextLayer(text: String) {
         val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
         val newLayer = SceneLayer(

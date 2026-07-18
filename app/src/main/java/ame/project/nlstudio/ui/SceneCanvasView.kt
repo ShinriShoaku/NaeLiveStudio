@@ -377,6 +377,9 @@ class SceneCanvasView @JvmOverloads constructor(
             LayerType.VIDEO -> android.R.drawable.ic_media_play
             LayerType.TEXT -> android.R.drawable.ic_menu_edit
             LayerType.VOICE_ANIM -> android.R.drawable.ic_btn_speak_now
+            LayerType.TIKTOK_CHAT -> android.R.drawable.ic_menu_send
+            LayerType.TIKTOK_GIFT -> android.R.drawable.btn_star_big_on
+            LayerType.TIKTOK_JOIN -> android.R.drawable.ic_menu_add
             else -> null
         }
         if (badgeIcon != null) {

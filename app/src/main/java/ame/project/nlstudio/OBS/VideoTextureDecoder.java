@@ -145,8 +145,17 @@ public class VideoTextureDecoder {
         if (decodeThread != null) {
             decodeThread.interrupt();
             try {
-                decodeThread.join(200);
+                decodeThread.join(500);
             } catch (InterruptedException ignored) {}
+            if (decodeThread.isAlive()) {
+                // Jarang terjadi, tapi kalau sampai ke sini JANGAN lanjut release codec dari thread
+                // lain sementara decodeThread masih hidup - MediaCodec TIDAK aman diakses dari 2
+                // thread sekaligus (dequeueOutputBuffer di decodeThread vs stop()/release() di
+                // glHandler). Device Android 14 lebih ketat soal ini dibanding Android 12 (yang
+                // cenderung diam-diam mentolerir race ini). Cukup log, resource-nya akan ke-GC lewat
+                // finalizer MediaCodec kalau memang bocor - lebih aman daripada crash/corrupt state.
+                Log.w(TAG, "stop(): decodeThread belum berhenti setelah 500ms, skip release codec paksa");
+            }
             decodeThread = null;
         }
 
@@ -168,8 +177,17 @@ public class VideoTextureDecoder {
                         }
                     });
                     try {
-                        // Tunggu sebentar agar resource bersih, tapi jangan kelamaan (ANR)
-                        if (!done[0]) lock.wait(200);
+                        // FIX ANDROID 14: MediaCodec.stop()/release() utk hardware decoder bisa
+                        // makan waktu lebih lama di sini dibanding Android 12 (driver/HAL lebih
+                        // ketat soal teardown codec). 200ms dulu kadang belum cukup -> release()
+                        // masih jalan di background pas kode lanjut ganti scene, resource sempat
+                        // tumpang-tindih. Dinaikkan ke 500ms; caller (switchScene) sudah jalan di
+                        // sceneSwitchExecutor (background thread), jadi aman sedikit lebih lama,
+                        // tidak menyebabkan ANR.
+                        if (!done[0]) lock.wait(500);
+                        if (!done[0]) {
+                            Log.w(TAG, "stop(): releaseGlAndCodec belum selesai setelah 500ms, lanjut tanpa menunggu");
+                        }
                     } catch (InterruptedException ignored) {}
                 }
             }
@@ -504,7 +522,21 @@ public class VideoTextureDecoder {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
             if (eglSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, eglSurface);
             if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext);
-            EGL14.eglTerminate(eglDisplay);
+            // FIX BLACKSCREEN GANTI SCENE (khusus Android 14): JANGAN panggil eglTerminate(eglDisplay)
+            // di sini. eglDisplay = eglGetDisplay(EGL_DEFAULT_DISPLAY) adalah SATU koneksi display
+            // yang DI-SHARE UNTUK SELURUH PROSES APP - bukan cuma milik VideoTextureDecoder ini.
+            // RootEncoder (GlStreamInterface, yang me-render composite scene ke encoder RTMP) JUGA
+            // pakai EGL_DEFAULT_DISPLAY yang SAMA di context terpisah. eglTerminate() mematikan
+            // koneksi DISPLAY itu untuk SEMUA context yang masih memakainya, bukan cuma punya kita.
+            // Sebelumnya, tiap kali scene dengan background VIDEO di-stop() (ganti ke scene lain),
+            // baris ini ikut merusak context GL milik RootEncoder yang masih aktif -> hasil render
+            // scene BERIKUTNYA jadi rusak/black screen. Driver GPU Android 12 (lama) cenderung
+            // "menoleransi" eglTerminate yang sembarangan ini (efeknya nyaris tak terlihat), tapi
+            // driver Android 14 (lebih baru/strict) langsung meng-invalidate display beneran ->
+            // muncul persis sebagai black screen setelah ganti scene, hanya di Android 14.
+            // Cukup destroy context+surface milik context INI SENDIRI (baris di atas) - TIDAK
+            // PERLU eglTerminate sama sekali; display akan dibersihkan otomatis oleh sistem saat
+            // proses app berakhir.
         }
         eglDisplay = EGL14.EGL_NO_DISPLAY;
         eglContext = EGL14.EGL_NO_CONTEXT;

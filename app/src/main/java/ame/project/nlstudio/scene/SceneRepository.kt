@@ -170,8 +170,60 @@ class SceneRepository(private val context: Context) {
             LayerType.VIDEO -> extractVideoFrame(Uri.parse(layer.uri))
             LayerType.SCREEN -> renderScreenPlaceholder()
             LayerType.VOICE_ANIM -> loadVoiceAnimPreview(layer)
+            LayerType.TIKTOK_CHAT -> renderTikTokChatPlaceholder()
+            LayerType.TIKTOK_GIFT -> renderTikTokGiftPlaceholder()
+            LayerType.TIKTOK_JOIN -> renderTikTokJoinPlaceholder()
             else -> loadPreviewBitmap(Uri.parse(layer.uri))
         }
+    }
+
+    private fun renderTikTokJoinPlaceholder(): Bitmap {
+        val bmp = Bitmap.createBitmap(160, 90, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#B0000000"))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 14f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("JOIN!", 80f, 40f, paint)
+        paint.color = Color.CYAN
+        paint.textSize = 10f
+        canvas.drawText("User Bergabung", 80f, 65f, paint)
+        return bmp
+    }
+
+    private fun renderTikTokGiftPlaceholder(): Bitmap {
+        val bmp = Bitmap.createBitmap(160, 90, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#B0000000"))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 14f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("GIFT!", 80f, 40f, paint)
+        paint.color = Color.YELLOW
+        paint.textSize = 10f
+        canvas.drawText("User mengirim Mawar x10", 80f, 65f, paint)
+        return bmp
+    }
+
+    private fun renderTikTokChatPlaceholder(): Bitmap {
+        val bmp = Bitmap.createBitmap(160, 90, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#B0000000"))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 14f
+            textAlign = Paint.Align.LEFT
+        }
+        canvas.drawText("TikTok Chat", 10f, 25f, paint)
+        paint.color = Color.WHITE
+        paint.textSize = 10f
+        canvas.drawText("User: Halo!", 10f, 45f, paint)
+        canvas.drawText("User2: Keren!", 10f, 65f, paint)
+        return bmp
     }
 
     private fun loadVoiceAnimPreview(layer: SceneLayer): Bitmap? {
