@@ -1,0 +1,9 @@
+ame.project.nlsdk.nlstudio-sdk-pngs-0 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/generated/res/pngs/debug
+ame.project.nlsdk.nlstudio-sdk-updated_navigation_xml-1 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/generated/updated_navigation_xml/debug
+ame.project.nlsdk.nlstudio-sdk-mergeDebugResources-2 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/incremental/debug/mergeDebugResources/merged.dir
+ame.project.nlsdk.nlstudio-sdk-mergeDebugResources-3 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/incremental/debug/mergeDebugResources/stripped.dir
+ame.project.nlsdk.nlstudio-sdk-debug-4 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/merged_res/debug/mergeDebugResources
+ame.project.nlsdk.nlstudio-sdk-debug-5 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/packaged_res/debug/packageDebugResources
+ame.project.nlsdk.nlstudio-sdk-debug-6 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/debug/res
+ame.project.nlsdk.nlstudio-sdk-main-7 /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/res
+gradleHome-0 /home/shinri/.gradle

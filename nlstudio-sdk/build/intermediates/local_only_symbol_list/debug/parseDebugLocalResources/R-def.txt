@@ -1,0 +1,18 @@
+R_DEF: Internal format may change without notice
+local
+drawable kanae
+id btnPlayPause
+id btnRequest
+id btnSkip
+id btnStop
+id btnTikTokConnect
+id etRequest
+id etTikTokUser
+id ivThumbnail
+id sbVolume
+id tvArtist
+id tvChat
+id tvLyrics
+id tvTikTokStatus
+id tvTitle
+layout activity_kanae
