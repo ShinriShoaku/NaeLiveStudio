@@ -1,103 +1,98 @@
 # NL Studio (Nae Live Studio) 🎥✨
 
-**NL Studio** adalah platform *mobile broadcasting* yang dirancang khusus untuk kreator konten di Android. Aplikasi ini menghadirkan pengalaman layaknya **OBS (Open Broadcaster Software)** ke dalam genggaman tangan, memungkinkan pengguna untuk melakukan live streaming profesional ke platform seperti TikTok dengan fitur kustomisasi scene yang mendalam.
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Android-brightgreen.svg" alt="Platform" />
+  <img src="https://img.shields.io/badge/API-29%2B-blue.svg" alt="API Level" />
+  <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License" />
+  <img src="https://img.shields.io/badge/Kotlin-1.9%2B-purple.svg" alt="Kotlin" />
+</p>
+
+**NL Studio** adalah platform *mobile broadcasting* yang dirancang khusus untuk kreator konten di Android. Aplikasi ini menghadirkan pengalaman layaknya **OBS (Open Broadcaster Software)** ke dalam genggaman tangan, memungkinkan pengguna melakukan live streaming profesional ke berbagai platform seperti TikTok dengan fitur kustomisasi scene yang mendalam.
+
+---
+
+## 🖼️ Tampilan Aplikasi
+
+| Home Screen | Scene Editor | Live Stream |
+| :---: | :---: | :---: |
+| _(Coming Soon)_ | _(Coming Soon)_ | _(Coming Soon)_ |
 
 ---
 
 ## 🚀 Fitur Utama
 
-*   **OBS-style Scene Management**: Kelola berbagai *scene* dengan sistem *layer* (lapisan) yang fleksibel.
-*   **Multi-Source Overlay**: Dukungan layer untuk Capture Layar, Gambar, Video, Teks, hingga Animasi Suara.
-*   **Integrasi TikTok Real-time**: Menampilkan pesan chat, gift, dan notifikasi interaksi (follow/like/share) TikTok secara langsung di atas stream.
-*   **Professional Audio Mixer**: Kontrol volume Mikofon dan Audio Sistem secara terpisah untuk hasil suara yang seimbang.
-*   **Smooth Transitions**: Efek *cross-fade* antar scene untuk transisi yang elegan dan profesional.
-*   **High-Performance Encoding**: Mendukung hardware & software encoding dengan optimasi khusus untuk Android 14+.
-*   **Music Integration (Kanae Service)**: Integrasi dengan layanan musik untuk menampilkan informasi lagu dan kontrol pemutaran.
-*   **Local Test Recording**: Fitur rekam lokal untuk menguji kualitas encoder sebelum melakukan live streaming.
+*   **🎨 OBS-style Scene Management**: Kelola berbagai *scene* dengan sistem *layer* (lapisan) yang fleksibel.
+*   **🧩 Multi-Source Overlay**: Dukungan layer untuk Capture Layar, Gambar, Video, Teks, hingga Animasi Suara.
+*   **📱 Integrasi TikTok Real-time**: Menampilkan pesan chat, gift, dan notifikasi interaksi (follow/like/share) secara langsung.
+*   **🔊 Professional Audio Mixer**: Kontrol volume Mikrofon dan Audio Sistem secara terpisah.
+*   **✨ Smooth Transitions**: Efek *cross-fade* antar scene untuk transisi yang elegan.
+*   **⚡ High-Performance Encoding**: Optimasi khusus untuk Android 14+ (API 34).
+*   **🎵 Music Integration (Kanae Service)**: Kontrol musik dan info lagu secara *real-time*.
+*   **📹 Local Test Recording**: Rekam lokal untuk menguji kualitas sebelum *go live*.
 
 ---
 
 ## 🏗️ Arsitektur Proyek
 
-NL Studio dibangun dengan arsitektur modular yang memisahkan logika inti streaming dengan antarmuka integrasi pihak ketiga.
+NL Studio menggunakan arsitektur modular untuk memastikan performa tinggi dan skalabilitas.
 
-### 📐 Diagram Blok Arsitektur
+### 📐 Diagram Alur
 
 ```mermaid
 graph TD
-    A[App Module] --> B[StreamService]
-    A --> C[Scene Editor]
-    B --> D[CompositeSceneVideoSource]
-    D --> E[Canvas Renderer]
+    subgraph "UI Layer"
+        A[App Module]
+        C[Scene Editor]
+    end
+
+    subgraph "Core Engine"
+        B[StreamService]
+        D[CompositeSceneVideoSource]
+        E[Canvas Renderer]
+    end
+
+    subgraph "External Integration"
+        G[NL Studio SDK]
+        H[Kanae Service]
+    end
+
+    A --> B
+    C --> B
+    B --> D
+    D --> E
     E --> F[RTMP Stream / Encoder]
     
-    B <--> G[nlstudio-sdk]
-    G <--> H[External Service: Kanae]
-    
-    I[TikTokChatBus] -.-> E
-    J[MusicBus] -.-> E
+    B <--> G
+    G <--> H
 ```
 
 ### 🧩 Komponen Utama
 
-1.  **StreamService (Foreground Service)**:
-    Jantung dari aplikasi yang menjaga proses streaming tetap berjalan di latar belakang. Mengelola `MediaProjection`, `RtmpStream`, dan siklus hidup encoder.
-    
-2.  **CompositeSceneVideoSource**:
-    Engine rendering kustom yang menggabungkan berbagai sumber video/gambar ke dalam satu frame menggunakan `Canvas`. Engine ini menangani penempatan layer, z-index, dan transparansi.
-
-3.  **NL Studio SDK (nlstudio-sdk)**:
-    Modul yang menyediakan antarmuka **AIDL (Android Interface Definition Language)**. Ini memungkinkan NL Studio berkomunikasi dengan proses lain (seperti "Kanae Service") untuk mendapatkan data TikTok dan kontrol musik secara *inter-process*.
-
-4.  **VideoCacheManager**:
-    Sistem manajemen cache yang melakukan *pre-warming* pada aset video untuk memastikan transisi background scene yang instan tanpa *lag*.
-
----
-
-## 📂 Struktur Folder
-
-```text
-NLStudio/
-├── app/                     # Modul aplikasi utama (UI & Logika Bisnis)
-│   ├── src/main/java/.../OBS/       # Engine Streaming & Scene Rendering
-│   └── src/main/java/.../scene/     # Manajemen Repository & Model Scene
-├── nlstudio-sdk/            # SDK untuk integrasi pihak ketiga
-│   └── src/main/aidl/       # Definisi interface komunikasi (IKanaeService)
-└── build.gradle             # Konfigurasi build proyek
-```
+1.  **StreamService**: Jantung aplikasi (Foreground Service) yang mengelola `MediaProjection` dan siklus hidup streaming.
+2.  **CompositeSceneVideoSource**: Engine rendering kustom yang menggabungkan berbagai layer menggunakan `Canvas`.
+3.  **NL Studio SDK**: Antarmuka **AIDL** untuk komunikasi *inter-process* dengan layanan pihak ketiga.
+4.  **VideoCacheManager**: Sistem manajemen cache untuk memastikan aset video termuat secara instan.
 
 ---
 
 ## 🛠️ Tech Stack
 
-*   **Language**: Kotlin & Java
-*   **Streaming Engine**: RootEncoder (RTMP/RTSP/SRT)
-*   **UI Framework**: Android Jetpack (AppCompat, Material Design)
-*   **IPC**: AIDL for Inter-Process Communication
-*   **Concurrency**: Kotlin Coroutines & SingleThreadExecutor for smooth rendering
-*   **Graphics**: Canvas API & GLStreamInterface
-*   **Compatibility**: Optimized for Android 10+ (API 29) up to Android 14+ (API 34)
-
----
-
-## 🎨 Prinsip Desain
-
-*   **Smoothness First**: Semua tugas berat (decoding, JSON parsing, file I/O) dipindahkan ke background thread untuk menjaga UI tetap responsif 60 FPS.
-*   **Modularitas**: Pemisahan SDK memudahkan pengembangan fitur baru atau integrasi dengan layanan streaming lainnya di masa depan.
-*   **Resource Efficiency**: Penggunaan `VirtualDisplay` global dan sistem cache cerdas untuk meminimalkan beban CPU dan konsumsi baterai.
+- **Languages**: Kotlin (Utama) & Java
+- **Streaming**: [RootEncoder](https://github.com/pedroSG94/RootEncoder) (RTMP, RTSP, SRT)
+- **Graphics**: Canvas API & GLStreamInterface
+- **IPC**: AIDL for Inter-Process Communication
+- **Architecture**: MVVM + Modular
 
 ---
 
 ## ☕ Dukungan & Donasi
 
-Jika Anda merasa proyek ini bermanfaat dan ingin mendukung pengembangannya, Anda dapat memberikan apresiasi melalui:
+Jika proyek ini membantu Anda, pertimbangkan untuk mendukung pengembang melalui:
 
 *   **Saweria**: [https://saweria.co/shinriMe](https://saweria.co/shinriMe)
-
-Setiap dukungan sangat berarti untuk menjaga keberlangsungan proyek ini. Terima kasih!
 
 ---
 
 <div align="center">
-  Dibuat dengan ❤️ untuk komunitas streamer Indonesia.
+  Dibuat dengan ❤️ oleh <b>Shinri</b>
 </div>
