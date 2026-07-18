@@ -88,6 +88,16 @@ NLStudio/
 
 ---
 
-<p align="center">
+## ☕ Dukungan & Donasi
+
+Jika Anda merasa proyek ini bermanfaat dan ingin mendukung pengembangannya, Anda dapat memberikan apresiasi melalui:
+
+*   **Saweria**: [https://saweria.co/shinriMe](https://saweria.co/shinriMe)
+
+Setiap dukungan sangat berarti untuk menjaga keberlangsungan proyek ini. Terima kasih!
+
+---
+
+<div align="center">
   Dibuat dengan ❤️ untuk komunitas streamer Indonesia.
-</p>
+</div>
