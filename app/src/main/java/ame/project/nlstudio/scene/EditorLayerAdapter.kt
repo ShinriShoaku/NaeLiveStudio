@@ -79,6 +79,14 @@ class EditorLayerAdapter(
                     ivTypeBadge.setImageResource(android.R.drawable.ic_menu_add)
                     ivTypeBadge.visibility = View.VISIBLE
                 }
+                LayerType.MUSIC_CURRENT -> {
+                    ivTypeBadge.setImageResource(android.R.drawable.ic_media_play)
+                    ivTypeBadge.visibility = View.VISIBLE
+                }
+                LayerType.MUSIC_QUEUE -> {
+                    ivTypeBadge.setImageResource(android.R.drawable.ic_menu_sort_by_size)
+                    ivTypeBadge.visibility = View.VISIBLE
+                }
                 else -> ivTypeBadge.visibility = View.GONE
             }
 

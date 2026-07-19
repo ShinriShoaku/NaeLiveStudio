@@ -1327,6 +1327,14 @@ class MainActivity : AppCompatActivity() {
         dialogSceneManagerView.findViewById<View>(R.id.presetLandscapeFull)?.setOnClickListener {
             applyLandscapeFullPreset()
         }
+
+        findViewById<View>(R.id.fabZoomIn)?.setOnClickListener { sceneCanvasView.zoomIn() }
+        findViewById<View>(R.id.fabZoomOut)?.setOnClickListener { sceneCanvasView.zoomOut() }
+        findViewById<View>(R.id.btnMoveUp)?.setOnClickListener { sceneCanvasView.moveUp() }
+        findViewById<View>(R.id.btnMoveDown)?.setOnClickListener { sceneCanvasView.moveDown() }
+        findViewById<View>(R.id.btnMoveLeft)?.setOnClickListener { sceneCanvasView.moveLeft() }
+        findViewById<View>(R.id.btnMoveRight)?.setOnClickListener { sceneCanvasView.moveRight() }
+        findViewById<View>(R.id.btnMoveReset)?.setOnClickListener { sceneCanvasView.resetMove() }
     }
 
     private fun buildFullUrl(): String {

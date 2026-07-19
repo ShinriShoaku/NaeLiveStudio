@@ -938,19 +938,21 @@ public class StreamService extends Service implements ConnectChecker {
                         String firstUri = vaConfig.getItems().get(0).getImageUri();
                         if (!firstUri.isEmpty()) bmp = vaBitmaps.get(firstUri);
                     }
-                } else if ("TIKTOK_CHAT".equals(layerType) || "TIKTOK_GIFT".equals(layerType) || "TIKTOK_JOIN".equals(layerType)) {
+                } else if ("TIKTOK_CHAT".equals(layerType) || "TIKTOK_GIFT".equals(layerType) || "TIKTOK_JOIN".equals(layerType)
+                        || "MUSIC_CURRENT".equals(layerType) || "MUSIC_QUEUE".equals(layerType)) {
                     // FIX: dulu di sini digambar bitmap placeholder statis sekali ("CHAT"/"GIFT"/
                     // "JOIN") yang tidak pernah update. Sekarang bmp sengaja dibiarkan null -
                     // CompositeSceneVideoSource.drawLayers() yang re-render overlay ini TIAP FRAME
-                    // langsung dari data live TikTokChatBus (diisi lewat binding ke IKanaeService
-                    // di bawah), jadi chat/gift/join yang masuk beneran muncul di hasil record.
+                    // langsung dari data live TikTokChatBus/MusicBus (diisi lewat binding ke IKanaeService
+                    // di bawah), jadi chat/gift/join/music yang masuk beneran muncul di hasil record.
                 } else if (!"SCREEN".equals(layerType)) {
                     bmp = loadBitmapPreserveAspect(layerUri);
                 }
 
                 if (bmp == null && !"SCREEN".equals(layerType) && !"VOICE_ANIM".equals(layerType)
                         && !"TIKTOK_CHAT".equals(layerType) && !"TIKTOK_GIFT".equals(layerType)
-                        && !"TIKTOK_JOIN".equals(layerType)) continue;
+                        && !"TIKTOK_JOIN".equals(layerType)
+                        && !"MUSIC_CURRENT".equals(layerType) && !"MUSIC_QUEUE".equals(layerType)) continue;
 
                 CompositeSceneVideoSource.Layer layer = new CompositeSceneVideoSource.Layer(
                         bmp,

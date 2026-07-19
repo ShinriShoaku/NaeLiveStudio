@@ -64,6 +64,76 @@ class SceneCanvasView @JvmOverloads constructor(
 
     private var selectedLayerId: String? = null
 
+    private var currentZoom = 1.0f
+    private var isPanning = false
+    private var panStartX = 0f
+    private var panStartY = 0f
+    private var initialTransX = 0f
+    private var initialTransY = 0f
+
+    fun zoomIn() {
+        currentZoom += 0.2f
+        applyZoom()
+    }
+
+    fun zoomOut() {
+        currentZoom = (currentZoom - 0.2f).coerceAtLeast(1.0f)
+        applyZoom()
+    }
+
+    fun moveUp() { translationY += 100f }
+    fun moveDown() { translationY -= 100f }
+    fun moveLeft() { translationX += 100f }
+    fun moveRight() { translationX -= 100f }
+    fun resetMove() {
+        translationX = 0f
+        translationY = 0f
+    }
+
+    fun getZoom(): Float = currentZoom
+
+    private fun applyZoom() {
+        scaleX = currentZoom
+        scaleY = currentZoom
+        if (currentZoom <= 1.0f) {
+            translationX = 0f
+            translationY = 0f
+        }
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (currentZoom > 1.0f) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    panStartX = event.rawX
+                    panStartY = event.rawY
+                    initialTransX = translationX
+                    initialTransY = translationY
+                    isPanning = true
+                    return true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (isPanning) {
+                        translationX = initialTransX + (event.rawX - panStartX)
+                        translationY = initialTransY + (event.rawY - panStartY)
+                        return true
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    isPanning = false
+                    if (event.actionMasked == MotionEvent.ACTION_UP) {
+                        performClick()
+                    }
+                }
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
+    override fun performClick(): Boolean {
+        return super.performClick()
+    }
+
     private val voiceAnimViews = mutableMapOf<String, ImageView>()
     private var currentLayers: List<SceneLayer> = emptyList()
 

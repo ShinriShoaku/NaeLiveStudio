@@ -173,6 +173,8 @@ class SceneRepository(private val context: Context) {
             LayerType.TIKTOK_CHAT -> renderTikTokChatPlaceholder()
             LayerType.TIKTOK_GIFT -> renderTikTokGiftPlaceholder()
             LayerType.TIKTOK_JOIN -> renderTikTokJoinPlaceholder()
+            LayerType.MUSIC_CURRENT -> renderMusicCurrentPlaceholder()
+            LayerType.MUSIC_QUEUE -> renderMusicQueuePlaceholder()
             else -> loadPreviewBitmap(Uri.parse(layer.uri))
         }
     }
@@ -223,6 +225,39 @@ class SceneRepository(private val context: Context) {
         paint.textSize = 10f
         canvas.drawText("User: Halo!", 10f, 45f, paint)
         canvas.drawText("User2: Keren!", 10f, 65f, paint)
+        return bmp
+    }
+
+    private fun renderMusicCurrentPlaceholder(): Bitmap {
+        val bmp = Bitmap.createBitmap(160, 90, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#B0000000"))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 14f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("MUSIC PLAYER", 80f, 35f, paint)
+        paint.color = Color.WHITE
+        paint.textSize = 10f
+        canvas.drawText("Song Title - Artist", 80f, 60f, paint)
+        return bmp
+    }
+
+    private fun renderMusicQueuePlaceholder(): Bitmap {
+        val bmp = Bitmap.createBitmap(160, 90, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#B0000000"))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 14f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("MUSIC QUEUE", 80f, 35f, paint)
+        paint.color = Color.GRAY
+        paint.textSize = 9f
+        canvas.drawText("1. Song A - User X", 80f, 55f, paint)
+        canvas.drawText("2. Song B - User Y", 80f, 75f, paint)
         return bmp
     }
 
