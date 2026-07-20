@@ -20,4 +20,5 @@
     <string name="stop">⏹ STOP</string>
     <string name="live">🔴 LIVE</string>
     <string name="label_video_bg_scale">Video Background Scale:</string>
+    <string name="video_thumbnail_desc">Pratinjau Video</string>
 </resources>

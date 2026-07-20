@@ -456,7 +456,7 @@ public class StreamService extends Service implements ConnectChecker {
 
     private final AudioLevelBus.Listener audioLevelListener = new AudioLevelBus.Listener() {
         @Override
-        public void onLevels(float micLevel, float systemLevel) {
+        public void onLevels(float micLevel, float systemLevel, float musicLevel) {
             com.pedro.encoder.input.sources.video.VideoSource source = currentSceneSource;
             if (source instanceof CompositeSceneVideoSource) {
                 ((CompositeSceneVideoSource) source).setMicLevel(micLevel);
@@ -500,6 +500,7 @@ public class StreamService extends Service implements ConnectChecker {
             int encoderType = intent.getIntExtra(EXTRA_ENCODER_TYPE, 0);
             float micGain = intent.getFloatExtra(EXTRA_MIC_GAIN, 1.0f);
             float systemGain = intent.getFloatExtra(EXTRA_SYSTEM_GAIN, 1.0f);
+            float musicGain = intent.getFloatExtra("musicGain", 1.0f);
             int gameUid = intent.getIntExtra(EXTRA_GAME_UID, -1);
 
             String initialSceneType = intent.getStringExtra(EXTRA_SCENE_TYPE);
@@ -562,10 +563,10 @@ public class StreamService extends Service implements ConnectChecker {
             if (ACTION_START.equals(action)) {
                 String rtmpUrl = intent.getStringExtra(EXTRA_RTMP_URL);
                 startStreaming(resultCode, data, rtmpUrl, width, height, fps, vBitrate, aBitrate,
-                        audioSourceIndex, encoderType, micGain, systemGain, gameUid, initialSceneType, initialSceneJson);
+                        audioSourceIndex, encoderType, micGain, systemGain, musicGain, gameUid, initialSceneType, initialSceneJson);
             } else {
                 long durationMs = intent.getLongExtra(EXTRA_TEST_DURATION_MS, DEFAULT_TEST_DURATION_MS);
-                startTestRecord(resultCode, data, width, height, fps, vBitrate, aBitrate, audioSourceIndex, encoderType, durationMs, micGain, systemGain, gameUid, initialSceneType, initialSceneJson);
+                startTestRecord(resultCode, data, width, height, fps, vBitrate, aBitrate, audioSourceIndex, encoderType, durationMs, micGain, systemGain, musicGain, gameUid, initialSceneType, initialSceneJson);
             }
         } else if (ACTION_STOP.equals(action)) {
             stopEverything();
@@ -577,9 +578,11 @@ public class StreamService extends Service implements ConnectChecker {
         } else if (ACTION_UPDATE_AUDIO_GAIN.equals(action)) {
             float micGain = intent.getFloatExtra(EXTRA_MIC_GAIN, 1.0f);
             float systemGain = intent.getFloatExtra(EXTRA_SYSTEM_GAIN, 1.0f);
+            float musicGain = intent.getFloatExtra("musicGain", 1.0f);
             if (audioMixSource != null) {
                 audioMixSource.setMicGain(micGain);
                 audioMixSource.setInternalGain(systemGain);
+                audioMixSource.setMusicGain(musicGain);
             }
         }
         return START_STICKY;
@@ -589,7 +592,7 @@ public class StreamService extends Service implements ConnectChecker {
 
     private void startStreaming(int resultCode, Intent data, String rtmpUrl, int width, int height, int fps,
                                 int vBitrate, int aBitrate, int audioSourceIndex, int encoderType,
-                                float micGain, float systemGain, int gameUid,
+                                float micGain, float systemGain, float musicGain, int gameUid,
                                 String initialSceneType, String initialSceneJson) {
         if (rtmpStream.isStreaming() || data == null || rtmpUrl == null || rtmpUrl.isEmpty()) {
             return;
@@ -637,7 +640,7 @@ public class StreamService extends Service implements ConnectChecker {
         savedMediaProjection = mediaProjection;
         startGlobalScreenCapture(mediaProjection);
 
-        applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
+        applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, musicGain, gameUid);
 
         // Terapkan source video awal berdasarkan scene yang dipilih. Belum ada scene aktif
         // sebelumnya di titik ini, jadi tidak ada snapshot untuk fade (null = cut biasa).
@@ -886,8 +889,10 @@ public class StreamService extends Service implements ConnectChecker {
                 if (bmp == null && !"SCREEN".equals(layerType) && !"VOICE_ANIM".equals(layerType)
                         && !"TIKTOK_CHAT".equals(layerType) && !"TIKTOK_GIFT".equals(layerType)
                         && !"TIKTOK_JOIN".equals(layerType)
-                        && !"MUSIC_CURRENT".equals(layerType) && !"MUSIC_QUEUE".equals(layerType)) continue;
+                        && !"MUSIC_CURRENT".equals(layerType) && !"MUSIC_QUEUE".equals(layerType)
+                        && !"MUSIC".equals(layerType) && !"EFFECT".equals(layerType)) continue;
 
+                Log.d(TAG, "Adding composite layer: " + layerType + " uri=" + lo.optString("uri", ""));
                 CompositeSceneVideoSource.Layer layer = new CompositeSceneVideoSource.Layer(
                         bmp,
                         lo.optString("uri", ""),
@@ -906,15 +911,20 @@ public class StreamService extends Service implements ConnectChecker {
         // urutin sesuai zIndex biar layer "belakang" digambar duluan, layer "depan" nutup di atasnya
         Collections.sort(layers, (a, b) -> Integer.compare(a.zIndex, b.zIndex));
 
-        // Auto-mute internal audio jika tidak ada layer SCREEN
-        boolean hasScreenLayer = false;
+        Uri bgMusicUri = null;
         for (CompositeSceneVideoSource.Layer layer : layers) {
-            if (layer.type == ame.project.nlstudio.scene.LayerType.SCREEN) {
-                hasScreenLayer = true;
+            if (layer.type == ame.project.nlstudio.scene.LayerType.MUSIC) {
+                bgMusicUri = Uri.parse(layer.uri);
                 break;
             }
         }
-        updateInternalAudioMuteState(hasScreenLayer);
+
+        if (audioMixSource != null) {
+            audioMixSource.setMusicUri(bgMusicUri);
+            boolean internalEnabled = o.optBoolean("internalAudioEnabled", true);
+            audioMixSource.setInternalEnabled(internalEnabled);
+            Log.d(TAG, "Applied Music URI: " + bgMusicUri + ", Internal Audio: " + internalEnabled);
+        }
 
         CompositeSceneVideoSource source = new CompositeSceneVideoSource(
                 this, bgType, backgroundImage, backgroundVideoUri, layers, rootW, rootH);
@@ -946,6 +956,9 @@ public class StreamService extends Service implements ConnectChecker {
         if ("text".equals(uri.getScheme())) {
             // Ambil teks murni setelah "text:"
             return renderTextToBitmap(uri.getSchemeSpecificPart());
+        }
+        if ("effect".equals(uri.getScheme())) {
+            return renderEffectToBitmap(uri.getSchemeSpecificPart());
         }
         int maxDim = Math.max(savedWidth, savedHeight);
         try (InputStream is = getContentResolver().openInputStream(uri)) {
@@ -987,10 +1000,35 @@ public class StreamService extends Service implements ConnectChecker {
         return bitmap;
     }
 
+    private Bitmap renderEffectToBitmap(String effect) {
+        String emoji = "✨";
+        if (effect != null) {
+            if (effect.contains("heart")) emoji = "❤️";
+            else if (effect.contains("star")) emoji = "⭐";
+            else if (effect.contains("sparkle")) emoji = "✨";
+        }
+
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setTextSize(128f);
+        paint.setTextAlign(Paint.Align.CENTER);
+
+        Rect bounds = new Rect();
+        paint.getTextBounds(emoji, 0, emoji.length(), bounds);
+
+        int size = Math.max(bounds.width(), bounds.height()) + 40;
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+
+        Paint.FontMetrics fm = paint.getFontMetrics();
+        float y = (size / 2f) - (fm.ascent + fm.descent) / 2f;
+        canvas.drawText(emoji, size / 2f, y, paint);
+        return bitmap;
+    }
+
     // ==================== TEST RECORD (LOKAL, TANPA LIVE) ====================
 
     private void startTestRecord(int resultCode, Intent data, int width, int height, int fps, int vBitrate, int aBitrate, int audioSourceIndex, int encoderType, long durationMs,
-                                 float micGain, float systemGain, int gameUid,
+                                 float micGain, float systemGain, float musicGain, int gameUid,
                                  String initialSceneType, String initialSceneJson) {
         if (rtmpStream.isStreaming() || isTestRecording || data == null) {
             return;
@@ -1020,7 +1058,7 @@ public class StreamService extends Service implements ConnectChecker {
         savedMediaProjection = mediaProjection;
         startGlobalScreenCapture(mediaProjection);
 
-        applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, gameUid);
+        applyAudioSource(mediaProjection, audioSourceIndex, micGain, systemGain, musicGain, gameUid);
 
         if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
             try {
@@ -1144,13 +1182,14 @@ public class StreamService extends Service implements ConnectChecker {
     }
 
     private void applyAudioSource(MediaProjection mediaProjection, int audioSourceIndex,
-                                  float micGain, float systemGain, int gameUid) {
+                                  float micGain, float systemGain, float musicGain, int gameUid) {
         switch (audioSourceIndex) {
             case 0: // Internal + Mic
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    audioMixSource = new AudioMixSource(mediaProjection, -1);
+                    audioMixSource = new AudioMixSource(this, mediaProjection, -1);
                     audioMixSource.setMicGain(micGain);
                     audioMixSource.setInternalGain(systemGain);
+                    audioMixSource.setMusicGain(musicGain);
                     rtmpStream.changeAudioSource(audioMixSource);
                 } else {
                     rtmpStream.changeAudioSource(new MicrophoneSource());
@@ -1158,10 +1197,11 @@ public class StreamService extends Service implements ConnectChecker {
                 break;
             case 1: // Internal Only
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    audioMixSource = new AudioMixSource(mediaProjection, -1);
+                    audioMixSource = new AudioMixSource(this, mediaProjection, -1);
                     audioMixSource.setMicEnabled(false);
                     audioMixSource.setMicGain(0f);
                     audioMixSource.setInternalGain(systemGain);
+                    audioMixSource.setMusicGain(musicGain);
                     rtmpStream.changeAudioSource(audioMixSource);
                 } else {
                     rtmpStream.changeAudioSource(new MicrophoneSource());
@@ -1169,10 +1209,11 @@ public class StreamService extends Service implements ConnectChecker {
                 break;
             case 2: // Mic Only
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    audioMixSource = new AudioMixSource(mediaProjection, -1);
+                    audioMixSource = new AudioMixSource(this, mediaProjection, -1);
                     audioMixSource.setInternalEnabled(false);
                     audioMixSource.setInternalGain(0f);
                     audioMixSource.setMicGain(micGain);
+                    audioMixSource.setMusicGain(musicGain);
                     rtmpStream.changeAudioSource(audioMixSource);
                 } else {
                     rtmpStream.changeAudioSource(new MicrophoneSource());
@@ -1182,9 +1223,10 @@ public class StreamService extends Service implements ConnectChecker {
                 break;
             case AUDIO_MODE_MANUAL_MIXER: // Mixer manual - volume mic & sistem/game terpisah
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    audioMixSource = new AudioMixSource(mediaProjection, gameUid);
+                    audioMixSource = new AudioMixSource(this, mediaProjection, gameUid);
                     audioMixSource.setMicGain(micGain);
                     audioMixSource.setInternalGain(systemGain);
+                    audioMixSource.setMusicGain(musicGain);
                     rtmpStream.changeAudioSource(audioMixSource);
                 } else {
                     Toast.makeText(this, "Mixer manual butuh Android 10+", Toast.LENGTH_LONG).show();
@@ -1275,6 +1317,19 @@ public class StreamService extends Service implements ConnectChecker {
         // RAM-nya tidak nyangkut kepakai terus selama proses app masih hidup di background.
         VideoCacheManager.getInstance().clearAll();
         super.onDestroy();
+    }
+
+    private String getRealPathFromURI(Uri contentUri) {
+        String res = null;
+        String[] proj = { android.provider.MediaStore.Audio.Media.DATA };
+        android.database.Cursor cursor = getContentResolver().query(contentUri, proj, null, null, null);
+        if (cursor != null && cursor.moveToFirst()) {
+            int column_index = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Audio.Media.DATA);
+            res = cursor.getString(column_index);
+            cursor.close();
+        }
+        if (res == null) res = contentUri.getPath(); // Fallback
+        return res;
     }
 
     private Notification buildNotification(String action) {

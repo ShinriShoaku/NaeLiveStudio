@@ -1,6 +1,7 @@
 package ame.project.nlstudio.ui
 
 import ame.project.nlstudio.R
+import ame.project.nlstudio.scene.AnimationEffect
 import ame.project.nlstudio.scene.LayerType
 import ame.project.nlstudio.scene.SceneLayer
 import android.content.Context
@@ -135,6 +136,7 @@ class SceneCanvasView @JvmOverloads constructor(
     }
 
     private val voiceAnimViews = mutableMapOf<String, ImageView>()
+    private val effectViews = mutableMapOf<String, QuickAnimationView>()
     private var currentLayers: List<SceneLayer> = emptyList()
 
     private val minLayerPx get() = (48 * resources.displayMetrics.density).toInt()
@@ -425,6 +427,16 @@ class SceneCanvasView @JvmOverloads constructor(
             if (layer.type == LayerType.VOICE_ANIM) {
                 val contentIv = chip.findViewById<ImageView>(R.id.layer_content_iv)
                 if (contentIv != null) voiceAnimViews[layer.id] = contentIv
+            } else if (layer.type == LayerType.EFFECT) {
+                val animView = chip.findViewById<QuickAnimationView>(R.id.layer_effect_av)
+                if (animView != null) {
+                    effectViews[layer.id] = animView
+                    try {
+                        val effectName = layer.uri.replace("effect:", "")
+                        val effect = AnimationEffect.valueOf(effectName)
+                        animView.startAnimation(effect)
+                    } catch (ignored: Exception) {}
+                }
             }
             addView(chip)
         }
@@ -434,12 +446,19 @@ class SceneCanvasView @JvmOverloads constructor(
         val chip = FrameLayout(context)
         chip.tag = layer.id
 
-        val content = ImageView(context).apply {
-            id = R.id.layer_content_iv
-            scaleType = ImageView.ScaleType.FIT_XY
-            setImageBitmap(bitmap)
+        if (layer.type == LayerType.EFFECT) {
+            val animView = QuickAnimationView(context).apply {
+                id = R.id.layer_effect_av
+            }
+            chip.addView(animView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        } else {
+            val content = ImageView(context).apply {
+                id = R.id.layer_content_iv
+                scaleType = ImageView.ScaleType.FIT_XY
+                setImageBitmap(bitmap)
+            }
+            chip.addView(content, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         }
-        chip.addView(content, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
         // Badge kecil pojok kiri-atas nunjukin tipe layer (video/teks), biar jelas apa isinya
         // meskipun belum di-tap.
@@ -450,6 +469,8 @@ class SceneCanvasView @JvmOverloads constructor(
             LayerType.TIKTOK_CHAT -> android.R.drawable.ic_menu_send
             LayerType.TIKTOK_GIFT -> android.R.drawable.btn_star_big_on
             LayerType.TIKTOK_JOIN -> android.R.drawable.ic_menu_add
+            LayerType.EFFECT -> android.R.drawable.btn_star_big_on
+            LayerType.MUSIC -> android.R.drawable.ic_media_play
             else -> null
         }
         if (badgeIcon != null) {

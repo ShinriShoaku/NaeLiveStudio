@@ -12,7 +12,12 @@ enum class BackgroundType { SCREEN, COLOR, IMAGE, VIDEO }
 enum class LayerType {
     IMAGE, ICON, TEXT, VIDEO, SCREEN, VOICE_ANIM,
     TIKTOK_CHAT, TIKTOK_GIFT, TIKTOK_JOIN,
-    MUSIC_CURRENT, MUSIC_QUEUE
+    MUSIC_CURRENT, MUSIC_QUEUE, EFFECT, MUSIC
+}
+
+enum class AnimationEffect {
+    BURST, HEARTS, SNOW, RAINBOW, CONFETTI, FIREWORKS,
+    SPARKLE, BUBBLES, GLITTER, SPIRAL, PETALS, LEAVES, STARDUST, METEOR
 }
 
 /**
@@ -39,5 +44,6 @@ data class Scene(
     val layers: MutableList<SceneLayer> = mutableListOf(),
     val thumbnailPath: String? = null,             // hasil composite background+layers, dipakai buat preview list
     var rootWidth: Int = 1080,
-    var rootHeight: Int = 1920
+    var rootHeight: Int = 1920,
+    var internalAudioEnabled: Boolean = true
 )

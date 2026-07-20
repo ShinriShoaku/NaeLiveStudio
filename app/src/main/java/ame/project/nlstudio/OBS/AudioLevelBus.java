@@ -11,7 +11,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 public class AudioLevelBus {
 
     public interface Listener {
-        void onLevels(float micLevel, float systemLevel);
+        void onLevels(float micLevel, float systemLevel, float musicLevel);
     }
 
     private static final List<Listener> listeners = new CopyOnWriteArrayList<>();
@@ -24,15 +24,14 @@ public class AudioLevelBus {
         listeners.remove(l);
     }
 
-    // Deprecated, use register/unregister
     public static void setListener(Listener l) {
         listeners.clear();
         if (l != null) listeners.add(l);
     }
 
-    public static void publish(float micLevel, float systemLevel) {
+    public static void publish(float micLevel, float systemLevel, float musicLevel) {
         for (Listener l : listeners) {
-            l.onLevels(micLevel, systemLevel);
+            l.onLevels(micLevel, systemLevel, musicLevel);
         }
     }
 }

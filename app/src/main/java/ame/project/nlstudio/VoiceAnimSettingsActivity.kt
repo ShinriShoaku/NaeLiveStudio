@@ -245,7 +245,7 @@ class VoiceAnimSettingsActivity : AppCompatActivity() {
         testThread = null
     }
 
-    private val audioLevelListener = AudioLevelBus.Listener { mic, _ ->
+    private val audioLevelListener = AudioLevelBus.Listener { mic, _, _ ->
         if (!isTestingMic) {
             runOnUiThread {
                 vuMeter.setLevel(mic)

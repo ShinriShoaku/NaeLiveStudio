@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import ame.project.nlstudio.scene.LayerType;
+import ame.project.nlstudio.scene.AnimationEffect;
 
 /**
  * GPU Optimized Composite Scene Video Source.
@@ -48,6 +49,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         public final int zIndex;
         public ame.project.nlstudio.scene.VoiceAnimConfig voiceAnimConfig;
         public java.util.Map<String, Bitmap> voiceAnimBitmaps;
+        public ParticleSystem particleSystem;
 
         public final RectF reusableDst = new RectF();
         public android.graphics.ColorMatrix reusableColorMatrix;
@@ -160,16 +162,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             videoBgDecoder.setPlayWhenReady(true);
         }
 
-        // Pre-initialize Video Layers
-        for (Layer layer : layers) {
-            if (layer.type == LayerType.VIDEO && layer.uri != null) {
-                int lw = Math.max(1, Math.round(layer.w * designWidth));
-                int lh = Math.max(1, Math.round(layer.h * designHeight));
-                VideoTextureDecoder decoder = VideoCacheManager.getInstance().acquire(context, Uri.parse(layer.uri), lw, lh, targetFps);
-                decoder.setPlayWhenReady(true);
-                videoLayerDecoders.put(layer.uri, decoder);
-            }
-        }
+        // Pre-initialize Video Layers (Removed as per user request to use only background video)
 
         startDrawLoop();
     }
@@ -286,28 +279,9 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             }
 
             for (Layer layer : layers) {
-                if (layer.type == LayerType.VIDEO && layer.uri != null) {
-                    // Before drawing video, flush any pending non-video overlays below it
-                    if (hasPendingOverlays) {
-                        flushOverlayCanvas();
-                        hasPendingOverlays = false;
-                    }
-
-                    VideoTextureDecoder decoder = videoLayerDecoders.get(layer.uri);
-                    if (decoder != null) {
-                        int texId = getDecoderTexture(decoder);
-                        decoder.updateTexImage();
-                        float glX = (layer.x * 2.0f) - 1.0f;
-                        float glY = 1.0f - (layer.y * 2.0f);
-                        float glW = layer.w * 2.0f;
-                        float glH = layer.h * 2.0f;
-                        drawLayerTexture(oesProgram, texId, decoder.getTexMatrix(), glX, glY, glW, glH, true);
-                    }
-                } else {
-                    // Non-video layer: batch onto Canvas
-                    drawSingleLayer(overlayCanvas, layer, paint);
-                    hasPendingOverlays = true;
-                }
+                // Non-video layer: batch onto Canvas
+                drawSingleLayer(overlayCanvas, layer, paint);
+                hasPendingOverlays = true;
             }
 
             // Final flush for overlays on top
@@ -348,38 +322,24 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         return texId;
     }
 
-    private void drawLayerTexture(int program, int texId, float[] matrix, float x, float y, float w, float h, boolean isOes) {
-        GLES20.glUseProgram(program);
-        int posLoc = GLES20.glGetAttribLocation(program, "aPosition");
-        int texLoc = GLES20.glGetAttribLocation(program, "aTexCoord");
-        int mtxLoc = GLES20.glGetUniformLocation(program, "uMatrix");
-
-        // Custom vertices for this layer's position
-        float[] v = {
-                x, y - h,
-                x + w, y - h,
-                x, y,
-                x + w, y
-        };
-        FloatBuffer lb = ByteBuffer.allocateDirect(v.length * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
-        lb.put(v).position(0);
-
-        GLES20.glEnableVertexAttribArray(posLoc);
-        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, lb);
-        GLES20.glEnableVertexAttribArray(texLoc);
-        GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
-        GLES20.glUniformMatrix4fv(mtxLoc, 1, false, matrix, 0);
-
-        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(isOes ? GLES11Ext.GL_TEXTURE_EXTERNAL_OES : GLES20.GL_TEXTURE_2D, texId);
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-    }
-
 
     private void drawSingleLayer(Canvas canvas, Layer layer, Paint paint) {
         Bitmap bmp = layer.bitmap;
         RectF dst = layer.reusableDst;
         dst.set(layer.x * designWidth, layer.y * designHeight, (layer.x + layer.w) * designWidth, (layer.y + layer.h) * designHeight);
+
+        if (layer.type == LayerType.EFFECT) {
+            if (layer.particleSystem == null) {
+                AnimationEffect effect = AnimationEffect.BURST;
+                try {
+                    String effectName = layer.uri.replace("effect:", "");
+                    effect = AnimationEffect.valueOf(effectName);
+                } catch (Exception ignored) {}
+                layer.particleSystem = new ParticleSystem(effect, designWidth, designHeight);
+            }
+            layer.particleSystem.updateAndDraw(canvas, paint, dst);
+            return;
+        }
 
         // Dynamic Layers
         if (layer.type == LayerType.TIKTOK_CHAT || layer.type == LayerType.TIKTOK_GIFT ||
@@ -559,4 +519,144 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
     @Override public void setFadeFromSnapshot(Bitmap s) {}
     @Override public Bitmap peekCurrentFrame() { return null; }
+
+    // --- Particle System for Stream Output (Canvas based for simplicity and lightweight) ---
+    public static class ParticleSystem {
+        private static final int MAX_PARTICLES = 200; // Reduced for stream to keep it lightweight
+        private final AnimationEffect effect;
+        private final int width, height;
+        private final Particle[] pool;
+        private long lastUpdateTime;
+        private final java.util.Random random = new java.util.Random();
+
+        private static class Particle {
+            boolean active = false;
+            long birthTime;
+            float life, x0, y0, vx, vy, r, g, b, baseSize, shape, seed, seed2;
+        }
+
+        public ParticleSystem(AnimationEffect effect, int width, int height) {
+            this.effect = effect;
+            this.width = width;
+            this.height = height;
+            this.pool = new Particle[MAX_PARTICLES];
+            for (int i = 0; i < MAX_PARTICLES; i++) pool[i] = new Particle();
+            this.lastUpdateTime = System.currentTimeMillis();
+        }
+
+        public void updateAndDraw(Canvas canvas, Paint paint, RectF dst) {
+            long now = System.currentTimeMillis();
+            float dt = (now - lastUpdateTime) / 1000f;
+            lastUpdateTime = now;
+
+            // Density based on layer size (proportional to area)
+            float densityFactor = (dst.width() * dst.height()) / (width * height);
+            int spawnRate = Math.max(1, (int)(10 * densityFactor * 5)); // Base spawn rate scaled
+
+            // Auto spawn for persistent effects
+            if (isPersistent(effect)) {
+                spawnParticles(spawnRate);
+            }
+
+            for (Particle p : pool) {
+                if (!p.active) continue;
+                float elapsed = (now - p.birthTime) / 1000f;
+                if (elapsed >= p.life) {
+                    p.active = false;
+                    continue;
+                }
+
+                float t = Math.min(1f, elapsed / p.life);
+                float curX, curY, curAlpha, curSize;
+
+                // Simple physics port from QuickAnimationView
+                switch (effect) {
+                    case BURST:
+                        float damp = Math.max(0f, 1f - 0.5f * elapsed);
+                        curX = p.x0 + p.vx * elapsed * damp;
+                        curY = p.y0 + p.vy * elapsed * damp + 0.4f * elapsed * elapsed;
+                        curAlpha = 1f - t;
+                        curSize = p.baseSize * (1f - 0.2f * t);
+                        break;
+                    case SNOW:
+                    case CONFETTI:
+                    case LEAVES:
+                    case PETALS:
+                        float drift = (float)Math.sin(elapsed * 2f + p.seed * 6.283f) * 0.06f;
+                        curX = p.x0 + p.vx * elapsed + drift;
+                        curY = p.y0 + p.vy * elapsed;
+                        curAlpha = Math.min(elapsed / 0.2f, (p.life - elapsed) / 0.5f);
+                        curSize = p.baseSize;
+                        break;
+                    case HEARTS:
+                    case BUBBLES:
+                        float sway = (float)Math.sin(elapsed * 3f + p.seed * 6.283f) * 0.08f;
+                        curX = p.x0 + p.vx * elapsed + sway;
+                        curY = p.y0 + p.vy * elapsed;
+                        curAlpha = Math.min(elapsed / 0.2f, (p.life - elapsed) / 0.5f);
+                        curSize = p.baseSize;
+                        break;
+                    default:
+                        curX = p.x0 + p.vx * elapsed;
+                        curY = p.y0 + p.vy * elapsed;
+                        curAlpha = 1f - t;
+                        curSize = p.baseSize;
+                }
+
+                paint.setARGB((int)(curAlpha * 255), (int)(p.r * 255), (int)(p.g * 255), (int)(p.b * 255));
+                
+                // Scale coordinate to layer bounds instead of full design resolution
+                float px = dst.left + (curX + 1f) / 2f * dst.width();
+                float py = dst.top + (curY + 1f) / 2f * dst.height();
+                
+                // Scale particle size based on layer width
+                float scaledSize = curSize * (dst.width() / width);
+                
+                // Draw simple shapes on canvas
+                if (p.shape == 1f) { // HEART approx
+                     canvas.drawCircle(px, py, scaledSize / 2f, paint);
+                } else if (p.shape == 3f) { // DIAMOND
+                     canvas.drawRect(px - scaledSize/2, py - scaledSize/2, px + scaledSize/2, py + scaledSize/2, paint);
+                } else {
+                     canvas.drawCircle(px, py, scaledSize / 2f, paint);
+                }
+            }
+            paint.setAlpha(255);
+        }
+
+        private boolean isPersistent(AnimationEffect e) {
+            return e == AnimationEffect.SNOW || e == AnimationEffect.CONFETTI || e == AnimationEffect.BUBBLES || 
+                   e == AnimationEffect.LEAVES || e == AnimationEffect.PETALS || e == AnimationEffect.STARDUST || e == AnimationEffect.HEARTS;
+        }
+
+        private void spawnParticles(int count) {
+            int spawned = 0;
+            for (int i = 0; i < MAX_PARTICLES && spawned < count; i++) {
+                if (!pool[i].active) {
+                    initParticle(pool[i]);
+                    spawned++;
+                }
+            }
+        }
+
+        private void initParticle(Particle p) {
+            p.active = true;
+            p.birthTime = System.currentTimeMillis();
+            p.seed = random.nextFloat();
+            p.seed2 = random.nextFloat() * 2f - 1f;
+            
+            p.x0 = random.nextFloat() * 2f - 1f;
+            p.y0 = (effect == AnimationEffect.SNOW || effect == AnimationEffect.CONFETTI) ? -1.1f : 1.1f;
+            p.vx = random.nextFloat() * 0.4f - 0.2f;
+            p.vy = (effect == AnimationEffect.SNOW || effect == AnimationEffect.CONFETTI) ? (random.nextFloat() * 0.3f + 0.2f) : -(random.nextFloat() * 0.3f + 0.2f);
+            
+            p.r = random.nextFloat(); p.g = random.nextFloat(); p.b = random.nextFloat();
+            p.life = random.nextFloat() * 2f + 2f;
+            p.baseSize = random.nextFloat() * 20f + 10f;
+            
+            if (effect == AnimationEffect.HEARTS) { p.r = 1f; p.g = 0.4f; p.b = 0.4f; p.shape = 1f; }
+            else if (effect == AnimationEffect.SNOW) { p.r = 1f; p.g = 1f; p.b = 1f; p.shape = 0f; }
+            else if (effect == AnimationEffect.CONFETTI) { p.shape = 3f; }
+        }
+    }
 }

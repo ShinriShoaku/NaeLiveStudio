@@ -60,7 +60,8 @@ class SceneRepository(private val context: Context) {
                         layers = layers,
                         thumbnailPath = o.optStringOrNull("thumbnailPath"),
                         rootWidth = o.optInt("rootWidth", displayMetrics.widthPixels),
-                        rootHeight = o.optInt("rootHeight", displayMetrics.heightPixels)
+                        rootHeight = o.optInt("rootHeight", displayMetrics.heightPixels),
+                        internalAudioEnabled = o.optBoolean("internalAudioEnabled", true)
                     )
                 )
             }
@@ -84,6 +85,7 @@ class SceneRepository(private val context: Context) {
             o.put("thumbnailPath", s.thumbnailPath ?: JSONObject.NULL)
             o.put("rootWidth", s.rootWidth)
             o.put("rootHeight", s.rootHeight)
+            o.put("internalAudioEnabled", s.internalAudioEnabled)
             val layerArr = JSONArray()
             s.layers.forEach { l ->
                 val lo = JSONObject()
@@ -120,7 +122,8 @@ class SceneRepository(private val context: Context) {
         backgroundUri: String?,
         layers: List<SceneLayer>,
         rootWidth: Int? = null,
-        rootHeight: Int? = null
+        rootHeight: Int? = null,
+        internalAudioEnabled: Boolean = true
     ): Scene {
         val thumb = renderThumbnail(backgroundType, backgroundUri, layers)
         return Scene(
@@ -131,7 +134,8 @@ class SceneRepository(private val context: Context) {
             layers = layers.map { it.copy() }.toMutableList(),
             thumbnailPath = thumb,
             rootWidth = rootWidth ?: displayMetrics.widthPixels,
-            rootHeight = rootHeight ?: displayMetrics.heightPixels
+            rootHeight = rootHeight ?: displayMetrics.heightPixels,
+            internalAudioEnabled = internalAudioEnabled
         )
     }
 
@@ -149,6 +153,7 @@ class SceneRepository(private val context: Context) {
         o.put("backgroundUri", scene.backgroundUri ?: JSONObject.NULL)
         o.put("rootWidth", scene.rootWidth)
         o.put("rootHeight", scene.rootHeight)
+        o.put("internalAudioEnabled", scene.internalAudioEnabled)
         val layerArr = JSONArray()
         scene.layers.forEach { l ->
             val lo = JSONObject()
@@ -175,6 +180,8 @@ class SceneRepository(private val context: Context) {
             LayerType.TIKTOK_JOIN -> renderTikTokJoinPlaceholder()
             LayerType.MUSIC_CURRENT -> renderMusicCurrentPlaceholder()
             LayerType.MUSIC_QUEUE -> renderMusicQueuePlaceholder()
+            LayerType.MUSIC -> renderBgMusicPlaceholder(layer.uri)
+            LayerType.EFFECT -> renderEffectPlaceholder(layer.uri)
             else -> loadPreviewBitmap(Uri.parse(layer.uri))
         }
     }
@@ -258,6 +265,37 @@ class SceneRepository(private val context: Context) {
         paint.textSize = 9f
         canvas.drawText("1. Song A - User X", 80f, 55f, paint)
         canvas.drawText("2. Song B - User Y", 80f, 75f, paint)
+        return bmp
+    }
+
+    private fun renderEffectPlaceholder(uri: String): Bitmap {
+        val bmp = Bitmap.createBitmap(90, 90, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 40f
+            textAlign = Paint.Align.CENTER
+        }
+        val emoji = when {
+            uri.contains("heart") -> "❤️"
+            uri.contains("star") -> "⭐"
+            uri.contains("sparkle") -> "✨"
+            else -> "✨"
+        }
+        canvas.drawText(emoji, 45f, 60f, paint)
+        return bmp
+    }
+
+    private fun renderBgMusicPlaceholder(uri: String): Bitmap {
+        val bmp = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#40000000"))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 50f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("🎵", 60f, 75f, paint)
         return bmp
     }
 

@@ -2,6 +2,7 @@ package ame.project.nlstudio
 
 import ame.project.nlstudio.OBS.AudioLevelBus
 import ame.project.nlstudio.OBS.StreamService
+import ame.project.nlstudio.scene.AnimationEffect
 import ame.project.nlstudio.scene.BackgroundType
 import ame.project.nlstudio.scene.EditorLayerAdapter
 import ame.project.nlstudio.scene.LayerType
@@ -37,6 +38,12 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.ImageView
+import android.widget.CheckBox
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -97,11 +104,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerAudioSource: Spinner
     private lateinit var seekMicVolume: SeekBar
     private lateinit var seekSystemVolume: SeekBar
+    private lateinit var seekMusicVolume: SeekBar
     private lateinit var tvMicVolumeValue: TextView
     private lateinit var tvSystemVolumeValue: TextView
+    private lateinit var tvMusicVolumeValue: TextView
     private lateinit var spinnerGameAudioApp: Spinner
     private lateinit var vuMicLevel: VuMeterView
     private lateinit var vuSystemLevel: VuMeterView
+    private lateinit var vuMusicLevel: VuMeterView
     private var installedApps: List<AppEntry> = emptyList()
 
     // Scene Manager (editor kanvas ala OBS)
@@ -109,6 +119,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sceneRepository: SceneRepository
     private lateinit var sceneAdapter: SceneAdapter
     private lateinit var sceneCanvasView: SceneCanvasView
+    private lateinit var quickAnimationView: ame.project.nlstudio.ui.QuickAnimationView
     private lateinit var etNewSceneName: EditText
     // Diisi oleh applyGameCenteredPreset() supaya rootWidth/rootHeight yang dipakai saat SAVE
     // persis sama dengan yang dipakai saat menghitung rasio posisi layer SCREEN (dipaksa Portrait).
@@ -121,6 +132,8 @@ class MainActivity : AppCompatActivity() {
 
     // Main Preview Tool Menu
     private lateinit var btnAddImage: android.widget.ImageButton
+    private lateinit var btnAddEffect: android.widget.ImageButton
+    private lateinit var btnAddMusic: android.widget.ImageButton
     private lateinit var btnAddText: android.widget.ImageButton
     private lateinit var btnAddVoiceAnim: android.widget.ImageButton
     private lateinit var btnAddTikTokChat: android.widget.ImageButton
@@ -148,6 +161,7 @@ class MainActivity : AppCompatActivity() {
     private var layoutVideoControls: View? = null
     private var btnPlayVideo: android.widget.ImageButton? = null
     private var seekVideoProgress: SeekBar? = null
+    private var ivVideoControlThumb: ImageView? = null
     private var cbLoopVideo: android.widget.CheckBox? = null
     private var isUserSeekingVideo = false
 
@@ -158,6 +172,7 @@ class MainActivity : AppCompatActivity() {
     private var editingSceneId: String? = null
     private var editingBackgroundType: BackgroundType = BackgroundType.COLOR
     private var editingBackgroundUri: String? = null
+    private var editingInternalAudioEnabled: Boolean = true
     private var editingLayers: MutableList<SceneLayer> = mutableListOf()
     private var selectedLayerId: String? = null
 
@@ -286,6 +301,7 @@ class MainActivity : AppCompatActivity() {
                         editingBackgroundType = BackgroundType.VIDEO
                         editingBackgroundUri = outputUri.toString()
                         refreshCanvasBackground()
+                        updateVideoControlsVisibility()
                     }
                 }
 
@@ -313,17 +329,41 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-    // Pilih video buat LAYER (overlay) baru di scene yang lagi diedit
-    private val pickLayerVideoLauncher =
+    private val pickMusicLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
                 persistReadPermission(uri)
-                addLayer(LayerType.VIDEO, uri.toString(), w = 0.5f, h = 0.35f)
+                addLayer(LayerType.MUSIC, uri.toString(), w = 0.2f, h = 0.2f)
             }
         }
 
+    private fun showMusicAndAudioOptions() {
+        val options = arrayOf(
+            "Pilih Musik (File)",
+            "Internal System Audio: ${if (editingInternalAudioEnabled) "AKTIF ✅" else "MATI ❌"}"
+        )
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Music & Internal Audio")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> pickMusicLauncher.launch(arrayOf("audio/*"))
+                    1 -> {
+                        editingInternalAudioEnabled = !editingInternalAudioEnabled
+                        Toast.makeText(this, "Internal Audio untuk scene ini: ${if (editingInternalAudioEnabled) "AKTIF" else "MATI"}", Toast.LENGTH_SHORT).show()
+                        applyEditorChangesToLiveStream()
+                    }
+                }
+            }
+            .show()
+    }
+
     /** Tambah 1 layer baru ke scene yang lagi diedit & refresh kanvas. */
     private fun addLayer(type: LayerType, uri: String, w: Float, h: Float) {
+        // BATASAN: Music layer hanya boleh ada 1 per scene
+        if (type == LayerType.MUSIC) {
+            editingLayers.removeAll { it.type == LayerType.MUSIC }
+        }
+        
         val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
         val newLayer = SceneLayer(
             id = UUID.randomUUID().toString(),
@@ -401,6 +441,7 @@ class MainActivity : AppCompatActivity() {
 
         // Main preview scene tools
         sceneCanvasView = findViewById(R.id.sceneCanvasView)
+        quickAnimationView = findViewById(R.id.quickAnimationView)
         viewPager = findViewById(R.id.viewPager)
         tabLayout = findViewById(R.id.tabLayout)
 
@@ -446,10 +487,11 @@ class MainActivity : AppCompatActivity() {
         AudioLevelBus.registerListener(audioLevelListener)
     }
 
-    private val audioLevelListener = AudioLevelBus.Listener { mic, system ->
+    private val audioLevelListener = AudioLevelBus.Listener { mic, system, music ->
         runOnUiThread {
             if (::vuMicLevel.isInitialized) vuMicLevel.setLevel(mic)
             if (::vuSystemLevel.isInitialized) vuSystemLevel.setLevel(system)
+            if (::vuMusicLevel.isInitialized) vuMusicLevel.setLevel(music)
             sceneCanvasView.setVoiceAnimLevel(mic, sceneRepository)
         }
     }
@@ -478,22 +520,65 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadSettings() {
         val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
-        val bgScale = prefs.getString("video_bg_scale", "Default (Optimize Auto)") ?: "Default (Optimize Auto)"
+
+        // Connection Settings
+        val platformPos = prefs.getInt("platform_pos", 0)
+        spinnerPlatform.setSelection(platformPos)
+        etServerUrl.setText(prefs.getString("server_url", serverPresets.getOrElse(platformPos) { "" }))
+        etStreamKey.setText(prefs.getString("stream_key", ""))
+
+        // Quality Settings
+        setSpinnerValue(spinnerResolution, prefs.getString("resolution", "720p") ?: "720p")
+        setSpinnerValue(spinnerFps, prefs.getString("fps", "30") ?: "30")
+        setSpinnerValue(spinnerEncoderType, prefs.getString("encoder_type", "H264") ?: "H264")
+        setSpinnerValue(spinnerVideoBgScale, prefs.getString("video_bg_scale", "Default (Optimize Auto)") ?: "Default (Optimize Auto)")
+
+        etVideoBitrate.setText(prefs.getString("video_bitrate", "2500"))
+        etAudioBitrate.setText(prefs.getString("audio_bitrate", "128"))
         
-        // Find index of bgScale in spinner
-        val adapter = spinnerVideoBgScale.adapter
-        for (i in 0 until adapter.count) {
-            if (adapter.getItem(i).toString() == bgScale) {
-                spinnerVideoBgScale.setSelection(i)
-                break
-            }
-        }
+        // Load volume slider positions if saved
+        val micVol = prefs.getInt("vol_mic", 100)
+        val systemVol = prefs.getInt("vol_system", 100)
+        val musicVol = prefs.getInt("vol_music", 100)
+        if (::seekMicVolume.isInitialized) seekMicVolume.progress = micVol
+        if (::seekSystemVolume.isInitialized) seekSystemVolume.progress = systemVol
+        if (::seekMusicVolume.isInitialized) seekMusicVolume.progress = musicVol
+
+        val audioPkg = prefs.getString("audio_app_pkg", "") ?: ""
+        val audioIdx = installedApps.indexOfFirst { it.packageName == audioPkg }.coerceAtLeast(0)
+        spinnerGameAudioApp.setSelection(audioIdx)
+
+        updateUrlPreview()
     }
 
     private fun saveSettings() {
         val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
-        val bgScale = spinnerVideoBgScale.selectedItem?.toString() ?: "Default (Optimize Auto)"
-        prefs.edit().putString("video_bg_scale", bgScale).apply()
+        prefs.edit().apply {
+            putInt("platform_pos", spinnerPlatform.selectedItemPosition)
+            putString("server_url", etServerUrl.text.toString())
+            putString("stream_key", etStreamKey.text.toString())
+            putString("resolution", spinnerResolution.selectedItem?.toString())
+            putString("fps", spinnerFps.selectedItem?.toString())
+            putString("encoder_type", spinnerEncoderType.selectedItem?.toString())
+            putString("video_bitrate", etVideoBitrate.text.toString())
+            putString("audio_bitrate", etAudioBitrate.text.toString())
+            putString("video_bg_scale", spinnerVideoBgScale.selectedItem?.toString())
+
+            val audioApp = installedApps.getOrNull(spinnerGameAudioApp.selectedItemPosition)
+            putString("audio_app_pkg", audioApp?.packageName ?: "")
+
+            apply()
+        }
+    }
+
+    private fun setSpinnerValue(spinner: Spinner, value: String) {
+        val adapter = spinner.adapter
+        for (i in 0 until adapter.count) {
+            if (adapter.getItem(i).toString() == value) {
+                spinner.setSelection(i)
+                break
+            }
+        }
     }
 
     private fun showSettingsDialog() {
@@ -551,16 +636,30 @@ class MainActivity : AppCompatActivity() {
         spinnerAudioSource = root.findViewById(R.id.spinnerAudioSource)
         seekMicVolume = root.findViewById(R.id.seekMicVolume)
         seekSystemVolume = root.findViewById(R.id.seekSystemVolume)
+        seekMusicVolume = root.findViewById(R.id.seekMusicVolume)
         tvMicVolumeValue = root.findViewById(R.id.tvMicVolumeValue)
         tvSystemVolumeValue = root.findViewById(R.id.tvSystemVolumeValue)
+        tvMusicVolumeValue = root.findViewById(R.id.tvMusicVolumeValue)
         vuMicLevel = root.findViewById(R.id.vuMicLevel)
         vuSystemLevel = root.findViewById(R.id.vuSystemLevel)
+        vuMusicLevel = root.findViewById(R.id.vuMusicLevel)
 
         setupVolumeSliders()
+        
+        // Restore values after view binding
+        val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
+        seekMicVolume.progress = prefs.getInt("vol_mic", 100)
+        seekSystemVolume.progress = prefs.getInt("vol_system", 100)
+        seekMusicVolume.progress = prefs.getInt("vol_music", 100)
+        tvMicVolumeValue.text = "${seekMicVolume.progress}%"
+        tvSystemVolumeValue.text = "${seekSystemVolume.progress}%"
+        tvMusicVolumeValue.text = "${seekMusicVolume.progress}%"
     }
 
     private fun setupEditorPanel(root: View) {
         btnAddImage = root.findViewById(R.id.btnAddImage)
+        btnAddEffect = root.findViewById(R.id.btnAddEffect)
+        btnAddMusic = root.findViewById(R.id.btnAddMusic)
         btnAddText = root.findViewById(R.id.btnAddText)
         btnAddVoiceAnim = root.findViewById(R.id.btnAddVoiceAnim)
         btnAddTikTokChat = root.findViewById(R.id.btnAddTikTokChat)
@@ -582,6 +681,7 @@ class MainActivity : AppCompatActivity() {
         layoutVideoControls = root.findViewById(R.id.layoutVideoControls)
         btnPlayVideo = root.findViewById(R.id.btnPlayVideo)
         seekVideoProgress = root.findViewById(R.id.seekVideoProgress)
+        ivVideoControlThumb = root.findViewById(R.id.ivVideoControlThumb)
         cbLoopVideo = root.findViewById(R.id.cbLoopVideo)
 
         setupEditorTabs()
@@ -609,10 +709,29 @@ class MainActivity : AppCompatActivity() {
     private fun updateVideoControlsVisibility() {
         val isVideo = editingBackgroundType == BackgroundType.VIDEO
         layoutVideoControls?.visibility = if (isVideo) View.VISIBLE else View.GONE
+
+        if (isVideo) {
+            editingBackgroundUri?.let { uriStr ->
+                val uri = Uri.parse(uriStr)
+                // Extract frame as thumbnail
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val thumb = try {
+                        sceneRepository.extractVideoFrame(uri)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    withContext(Dispatchers.Main) {
+                        ivVideoControlThumb?.setImageBitmap(thumb)
+                    }
+                }
+            }
+        }
     }
 
     private fun setupMainSceneTools() {
         btnAddImage.setOnClickListener { showAddLayerOptions() }
+        btnAddEffect.setOnClickListener { showAddEffectDialog() }
+        btnAddMusic.setOnClickListener { showMusicAndAudioOptions() }
         btnAddText.setOnClickListener { showAddTextDialog() }
         btnAddVoiceAnim.setOnClickListener { showAddVoiceAnimOptions() }
         btnAddTikTokChat.setOnClickListener { addTikTokChatLayer() }
@@ -685,7 +804,8 @@ class MainActivity : AppCompatActivity() {
             backgroundUri = editingBackgroundUri,
             layers = editingLayers,
             rootWidth = targetW,
-            rootHeight = targetH
+            rootHeight = targetH,
+            internalAudioEnabled = editingInternalAudioEnabled
         )
         sendSceneSwitch(StreamService.SCENE_COMPOSITE, sceneRepository.toJson(tempScene))
     }
@@ -695,6 +815,8 @@ class MainActivity : AppCompatActivity() {
         selectedLayerId = layerId
         sceneCanvasView.setSelectedLayer(layerId)
         editorLayerAdapter?.submitList(editingLayers, layerId)
+        
+        // If it's a music layer, maybe show a hint or something?
     }
 
     private fun deleteLayer(layerId: String) {
@@ -723,14 +845,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAddLayerOptions() {
-        val options = arrayOf("Gambar", "Video", "Layar HP (PiP)")
+        val options = arrayOf("Gambar", "Layar HP (PiP)")
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Tambah Layer")
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> pickLayerImageLauncher.launch(arrayOf("image/*"))
-                    1 -> pickLayerVideoLauncher.launch(arrayOf("video/*"))
-                    2 -> {
+                    1 -> {
                         val metrics = resources.displayMetrics
                         val screenRatio = metrics.widthPixels.toFloat() / metrics.heightPixels
                         val (canvasW, canvasH) = getTargetResolution()
@@ -742,6 +863,23 @@ class MainActivity : AppCompatActivity() {
                         addLayer(LayerType.SCREEN, "screen://main", w = w, h = h)
                     }
                 }
+            }
+            .show()
+    }
+
+    private fun showAddEffectDialog() {
+        val effects = AnimationEffect.values()
+        val names = effects.map { it.name }.toTypedArray()
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Pilih Effect")
+            .setItems(names) { _, which ->
+                val effect = effects[which]
+                // Play in preview immediately
+                quickAnimationView.startAnimation(effect)
+                
+                // Add as layer if persistent (like SNOW, BUBBLES, etc) or just trigger if burst
+                addLayer(LayerType.EFFECT, "effect:${effect.name}", w = 1.0f, h = 1.0f)
             }
             .show()
     }
@@ -879,6 +1017,7 @@ class MainActivity : AppCompatActivity() {
                         editingBackgroundType = BackgroundType.COLOR
                         editingBackgroundUri = null
                         refreshCanvasBackground()
+                        updateVideoControlsVisibility()
                     }
                     1 -> pickBackgroundImageLauncher.launch(arrayOf("image/*"))
                     2 -> pickBackgroundVideoLauncher.launch(arrayOf("video/*"))
@@ -940,7 +1079,8 @@ class MainActivity : AppCompatActivity() {
             backgroundUri = editingBackgroundUri,
             layers = editingLayers,
             rootWidth = rootW,
-            rootHeight = rootH
+            rootHeight = rootH,
+            internalAudioEnabled = editingInternalAudioEnabled
         )
         val idx = scenes.indexOfFirst { it.id == scene.id }
         if (idx >= 0) {
@@ -969,6 +1109,7 @@ class MainActivity : AppCompatActivity() {
         editingSceneId = null
         editingBackgroundType = BackgroundType.COLOR
         editingBackgroundUri = null
+        editingInternalAudioEnabled = true
         editingLayers = mutableListOf()
         etNewSceneName.setText("")
         editingForcedRootResolution = null
@@ -976,6 +1117,7 @@ class MainActivity : AppCompatActivity() {
         refreshCanvasAspectRatio()
         refreshCanvasBackground()
         refreshCanvasLayers()
+        updateVideoControlsVisibility()
     }
 
     /** Load scene yang udah tersimpan ke kanvas editor, biar bisa diedit lagi (posisi layer, background, dll). */
@@ -992,6 +1134,7 @@ class MainActivity : AppCompatActivity() {
         editingSceneId = scene.id
         editingBackgroundType = scene.backgroundType
         editingBackgroundUri = scene.backgroundUri
+        editingInternalAudioEnabled = scene.internalAudioEnabled
         editingLayers = scene.layers.map { it.copy() }.toMutableList() // copy biar gak ubah data tersimpan sblm disave ulang
         etNewSceneName.setText(scene.name)
         editingForcedRootResolution = scene.rootWidth to scene.rootHeight
@@ -1000,6 +1143,7 @@ class MainActivity : AppCompatActivity() {
         refreshCanvasAspectRatio()
         refreshCanvasBackground()
         refreshCanvasLayers()
+        updateVideoControlsVisibility()
     }
 
     private fun applyPortraitPreset(position: String) { // "center", "top", "bottom"
@@ -1282,6 +1426,7 @@ class MainActivity : AppCompatActivity() {
         seekMicVolume.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 tvMicVolumeValue.text = "$progress%"
+                if (fromUser) saveVolumeSettings()
                 sendAudioGainUpdate()
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -1290,11 +1435,31 @@ class MainActivity : AppCompatActivity() {
         seekSystemVolume.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 tvSystemVolumeValue.text = "$progress%"
+                if (fromUser) saveVolumeSettings()
                 sendAudioGainUpdate()
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
+        seekMusicVolume.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                tvMusicVolumeValue.text = "$progress%"
+                if (fromUser) saveVolumeSettings()
+                sendAudioGainUpdate()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+    }
+
+    private fun saveVolumeSettings() {
+        val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
+        prefs.edit().apply {
+            putInt("vol_mic", seekMicVolume.progress)
+            putInt("vol_system", seekSystemVolume.progress)
+            putInt("vol_music", seekMusicVolume.progress)
+            apply()
+        }
     }
 
     private data class AppEntry(val label: String, val packageName: String, val uid: Int)
@@ -1368,6 +1533,7 @@ class MainActivity : AppCompatActivity() {
             action = StreamService.ACTION_UPDATE_AUDIO_GAIN
             putExtra(StreamService.EXTRA_MIC_GAIN, seekMicVolume.progress / 100f)
             putExtra(StreamService.EXTRA_SYSTEM_GAIN, seekSystemVolume.progress / 100f)
+            putExtra("musicGain", seekMusicVolume.progress / 100f)
         }
         try {
             startService(intent)

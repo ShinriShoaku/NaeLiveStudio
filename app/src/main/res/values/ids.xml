@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <item name="layer_content_iv" type="id" />
+    <item name="layer_effect_av" type="id" />
 </resources>

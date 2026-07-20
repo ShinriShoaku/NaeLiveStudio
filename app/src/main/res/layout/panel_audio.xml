@@ -32,5 +32,15 @@
         <TextView android:id="@+id/tvSystemVolumeValue" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="100%" android:textColor="#7FD8A6" android:textSize="12sp" />
     </LinearLayout>
     <SeekBar android:id="@+id/seekSystemVolume" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="200" android:progress="100" />
-    <ame.project.nlstudio.ui.VuMeterView android:id="@+id/vuSystemLevel" android:layout_width="match_parent" android:layout_height="8dp" />
+    <ame.project.nlstudio.ui.VuMeterView android:id="@+id/vuSystemLevel" android:layout_width="match_parent" android:layout_height="8dp" android:layout_marginBottom="12dp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+        <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="🎵 Music" android:textColor="#FFF" android:textSize="12sp" />
+        <TextView android:id="@+id/tvMusicVolumeValue" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="100%" android:textColor="#7FD8A6" android:textSize="12sp" />
+    </LinearLayout>
+    <SeekBar android:id="@+id/seekMusicVolume" android:layout_width="match_parent" android:layout_height="wrap_content" android:max="200" android:progress="100" />
+    <ame.project.nlstudio.ui.VuMeterView android:id="@+id/vuMusicLevel" android:layout_width="match_parent" android:layout_height="8dp" />
 </LinearLayout>
