@@ -18,7 +18,6 @@ import com.pedro.encoder.input.sources.audio.AudioSource;
 
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Custom audio source: capture MIC and INTERNAL AUDIO separately and mix them manually.
@@ -44,6 +43,7 @@ public class AudioMixSource extends AudioSource {
     private Thread internalCaptureThread;
     private Thread musicDecodeThread;
     private volatile boolean running = false;
+    private volatile boolean stopMusicThread = false;
     private GetMicrophoneData callback;
 
     private volatile float micGain = 1.0f;
@@ -90,33 +90,40 @@ public class AudioMixSource extends AudioSource {
 
         android.util.Log.d("AudioMixSource", "setMusicUri: " + uri);
         this.musicUri = uri;
-        this.musicEnabled = uri != null;
 
         // Restart decode thread if URI changed mid-stream
         if (running) {
+            stopMusicThread = true;
             if (musicDecodeThread != null) {
-                musicEnabled = false; // Signal old thread to stop
                 try {
-                    musicDecodeThread.join(100);
-                } catch (InterruptedException ignored) {}
+                    musicDecodeThread.join(200);
+                } catch (InterruptedException ignored) {
+                    musicDecodeThread.interrupt();
+                }
                 musicDecodeThread = null;
-                musicAudioQueue.clear();
-                musicEnabled = uri != null; // Re-enable
             }
+            musicAudioQueue.clear();
+            stopMusicThread = false;
+
+            this.musicEnabled = uri != null;
             if (musicEnabled && musicUri != null) {
                 musicDecodeThread = new Thread(this::musicDecodeLoop, "AudioMixSource-music");
                 musicDecodeThread.start();
             }
+        } else {
+            this.musicEnabled = uri != null;
         }
     }
 
     public void setMicEnabled(boolean enabled) {
         this.micEnabled = enabled;
+        if (!enabled) micAudioQueue.clear();
     }
 
     public void setInternalEnabled(boolean enabled) {
         if (this.internalEnabled == enabled) return;
         this.internalEnabled = enabled;
+        if (!enabled) internalAudioQueue.clear();
         // If disabled mid-stream, we can stop the record to be 100% sure no capture happens.
         // It will be restarted by setupRecords if needed, or we can just leave it stopped.
         if (!enabled && internalRecord != null && internalRecord.getState() == AudioRecord.STATE_INITIALIZED) {
@@ -183,6 +190,7 @@ public class AudioMixSource extends AudioSource {
                 micRecord.startRecording();
                 internalRecord.startRecording();
                 running = true;
+                stopMusicThread = false;
                 android.util.Log.i("AudioMixSource", "Records started.");
             } catch (Exception e) {
                 android.util.Log.e("AudioMixSource", "Exception starting records", e);
@@ -221,17 +229,26 @@ public class AudioMixSource extends AudioSource {
     @Override
     public void stop() {
         running = false;
+        stopMusicThread = true;
         try {
             if (captureThread != null) captureThread.join(200);
             if (micCaptureThread != null) micCaptureThread.join(200);
             if (internalCaptureThread != null) internalCaptureThread.join(200);
             if (musicDecodeThread != null) musicDecodeThread.join(200);
         } catch (InterruptedException ignored) {
+            if (captureThread != null) captureThread.interrupt();
+            if (micCaptureThread != null) micCaptureThread.interrupt();
+            if (internalCaptureThread != null) internalCaptureThread.interrupt();
+            if (musicDecodeThread != null) musicDecodeThread.interrupt();
         }
         captureThread = null;
         micCaptureThread = null;
         internalCaptureThread = null;
         musicDecodeThread = null;
+
+        micAudioQueue.clear();
+        internalAudioQueue.clear();
+        musicAudioQueue.clear();
 
         releaseRecord(micRecord);
         releaseRecord(internalRecord);
@@ -323,9 +340,9 @@ public class AudioMixSource extends AudioSource {
             loopCounter++;
             long startTime = System.currentTimeMillis();
 
-            byte[] micBuf = micEnabled ? micAudioQueue.poll() : null;
-            byte[] internalBuf = internalEnabled ? internalAudioQueue.poll() : null;
-            byte[] musicBuf = musicAudioQueue.poll(); 
+            byte[] micBuf = (micEnabled && running) ? micAudioQueue.poll() : null;
+            byte[] internalBuf = (internalEnabled && running) ? internalAudioQueue.poll() : null;
+            byte[] musicBuf = (musicEnabled && running) ? musicAudioQueue.poll() : null;
 
             int micLen = (micBuf != null) ? micBuf.length : 0;
             int internalLen = (internalBuf != null) ? internalBuf.length : 0;
@@ -425,12 +442,12 @@ public class AudioMixSource extends AudioSource {
             }
             extractor.selectTrack(audioTrackIndex);
             android.media.MediaFormat format = extractor.getTrackFormat(audioTrackIndex);
-            
+
             // Force 16-bit PCM output if the decoder supports it
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 format.setInteger(android.media.MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT);
             }
-            
+
             String mime = format.getString(android.media.MediaFormat.KEY_MIME);
             codec = android.media.MediaCodec.createDecoderByType(mime);
             codec.configure(format, null, null, 0);
@@ -441,13 +458,13 @@ public class AudioMixSource extends AudioSource {
             int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
             boolean inputDone = false;
             long totalFramesPushed = 0;
-            
+
             // Reusable buffer for accumulation to avoid constant allocations
             byte[] accumulator = new byte[bytesPerFrame * 4];
             int accumulatorPos = 0;
             int currentChannels = 2;
 
-            while (running && musicEnabled) {
+            while (running && !stopMusicThread) {
                 if (!inputDone) {
                     int inputIndex = codec.dequeueInputBuffer(10000);
                     if (inputIndex >= 0) {
@@ -468,50 +485,47 @@ public class AudioMixSource extends AudioSource {
                     java.nio.ByteBuffer outputBuffer = codec.getOutputBuffer(outputIndex);
                     if (outputBuffer != null && info.size > 0) {
                         outputBuffer.position(info.offset);
-                        
+
                         // Handle Mono to Stereo conversion and accumulation
                         if (currentChannels == 1) {
-                            while (outputBuffer.remaining() >= 2 && running) {
+                            while (outputBuffer.remaining() >= 2 && running && !stopMusicThread) {
                                 short sample = outputBuffer.getShort();
                                 // Write same sample to both L and R in accumulator
-                                if (accumulatorPos + 4 > accumulator.length) {
-                                    pushAccumulatedFrames(accumulator, accumulatorPos, bytesPerFrame);
+                                accumulator[accumulatorPos++] = (byte)(sample & 0xFF);
+                                accumulator[accumulatorPos++] = (byte)((sample >> 8) & 0xFF);
+                                accumulator[accumulatorPos++] = (byte)(sample & 0xFF);
+                                accumulator[accumulatorPos++] = (byte)((sample >> 8) & 0xFF);
+
+                                if (accumulatorPos >= bytesPerFrame) {
+                                    if (pushFrame(accumulator, bytesPerFrame)) {
+                                        totalFramesPushed++;
+                                    }
                                     accumulatorPos = 0;
                                 }
-                                accumulator[accumulatorPos++] = (byte)(sample & 0xFF);
-                                accumulator[accumulatorPos++] = (byte)((sample >> 8) & 0xFF);
-                                accumulator[accumulatorPos++] = (byte)(sample & 0xFF);
-                                accumulator[accumulatorPos++] = (byte)((sample >> 8) & 0xFF);
                             }
                         } else {
                             // Already Stereo (or multi-channel, simplified to Stereo by taking first 2)
-                            while (outputBuffer.remaining() > 0 && running) {
+                            while (outputBuffer.remaining() > 0 && running && !stopMusicThread) {
                                 int toCopy = Math.min(outputBuffer.remaining(), accumulator.length - accumulatorPos);
                                 outputBuffer.get(accumulator, accumulatorPos, toCopy);
                                 accumulatorPos += toCopy;
-                                
-                                if (accumulatorPos >= bytesPerFrame) {
-                                    int framesToPush = accumulatorPos / bytesPerFrame;
-                                    for (int f = 0; f < framesToPush; f++) {
-                                        byte[] frame = new byte[bytesPerFrame];
-                                        System.arraycopy(accumulator, f * bytesPerFrame, frame, 0, bytesPerFrame);
-                                        if (musicAudioQueue.offer(frame, 50, TimeUnit.MILLISECONDS)) {
-                                            totalFramesPushed++;
-                                        } else {
-                                            musicAudioQueue.poll();
-                                            musicAudioQueue.offer(frame);
-                                        }
+
+                                while (accumulatorPos >= bytesPerFrame) {
+                                    byte[] frame = new byte[bytesPerFrame];
+                                    System.arraycopy(accumulator, 0, frame, 0, bytesPerFrame);
+                                    if (pushFrame(frame, bytesPerFrame)) {
+                                        totalFramesPushed++;
                                     }
                                     // Move leftover to start
-                                    int leftover = accumulatorPos % bytesPerFrame;
+                                    int leftover = accumulatorPos - bytesPerFrame;
                                     if (leftover > 0) {
-                                        System.arraycopy(accumulator, framesToPush * bytesPerFrame, accumulator, 0, leftover);
+                                        System.arraycopy(accumulator, bytesPerFrame, accumulator, 0, leftover);
                                     }
                                     accumulatorPos = leftover;
                                 }
                             }
                         }
-                        
+
                         if (totalFramesPushed % 1000 == 0 && totalFramesPushed > 0) {
                             android.util.Log.v("AudioMixSource", "musicDecodeLoop: pushed " + totalFramesPushed + " frames");
                         }
@@ -539,17 +553,16 @@ public class AudioMixSource extends AudioSource {
         }
     }
 
-    private void pushAccumulatedFrames(byte[] acc, int pos, int bytesPerFrame) {
-        int frames = pos / bytesPerFrame;
-        for (int i = 0; i < frames; i++) {
-            byte[] frame = new byte[bytesPerFrame];
-            System.arraycopy(acc, i * bytesPerFrame, frame, 0, bytesPerFrame);
-            if (!musicAudioQueue.offer(frame)) {
-                musicAudioQueue.poll();
-                musicAudioQueue.offer(frame);
-            }
+    private boolean pushFrame(byte[] frameData, int size) {
+        byte[] frame = (frameData.length == size) ? frameData : java.util.Arrays.copyOf(frameData, size);
+        if (musicAudioQueue.offer(frame)) {
+            return true;
+        } else {
+            musicAudioQueue.poll();
+            return musicAudioQueue.offer(frame);
         }
     }
+
 
     private void mixAndPush(byte[] pcm, int size) {
         if (callback == null) {
