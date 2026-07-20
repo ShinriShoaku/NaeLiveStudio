@@ -54,7 +54,14 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
     private int videoTextureId = 0;
     private FloatBuffer vertexBuffer, texCoordBuffer;
     private final float[] identityMatrix = new float[16];
-    { android.opengl.Matrix.setIdentityM(identityMatrix, 0); }
+    private final float[] flipMatrix = new float[16];
+    {
+        android.opengl.Matrix.setIdentityM(identityMatrix, 0);
+        android.opengl.Matrix.setIdentityM(flipMatrix, 0);
+        // FIX: Flip Y-axis untuk output Bitmap (STATIC_IMAGE). Android Bitmap top-down,
+        // OpenGL bottom-up. Tanpa flip, gambar background di FakeScene akan terbalik.
+        android.opengl.Matrix.scaleM(flipMatrix, 0, 1f, -1f, 1f);
+    }
 
     public FakeSceneVideoSource(Context context, Bitmap staticImage) {
         super();
@@ -105,19 +112,23 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
             // Bangunkan thread dari Thread.sleep() di runDrawLoop supaya keluar SEGERA,
             // daripada nunggu pasif sampai frame interval berikutnya atau timeout join.
             drawThread.interrupt();
-            try { drawThread.join(300); } catch (InterruptedException ignored) {}
+            try { drawThread.join(1000); } catch (InterruptedException ignored) {}
+            drawThread = null;
         }
         if (videoUri != null) {
             VideoCacheManager.getInstance().release(videoUri);
         }
         videoDecoder = null;
-        if (staticImage != null && !staticImage.isRecycled()) {
-            staticImage.recycle();
-        }
-        if (targetSurface != null) {
-            targetSurface.release();
-            targetSurface = null;
-        }
+
+        // FIX "Handler on a dead thread": JANGAN langsung release targetSurface di sini.
+        // targetSurface membungkus SurfaceTexture milik Pedro's library. Jika di-release
+        // sebelum library selesai melakukan cleanup (misal black frame / tryClear),
+        // internal Handler di SurfaceTexture (yg dibuat di thread GL sebelumnya) akan
+        // komplain saat diakses. Biarkan GC yang membersihkan Surface wrapper ini.
+        targetSurface = null;
+
+        // JANGAN recycle staticImage di sini jika masih ada kemungkinan diakses oleh
+        // GL thread yang belum tuntas (walau sudah join). Biarkan pemanggil atau GC yang handle.
     }
 
     @Override public void release() { stop(); }
@@ -158,7 +169,7 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
                     GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
                     GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, staticImage, 0);
                 }
-                drawTexture(rgbaProgram, imageTextureId, identityMatrix, false);
+                drawTexture(rgbaProgram, imageTextureId, flipMatrix, false);
             }
 
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);

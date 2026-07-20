@@ -113,7 +113,15 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
     private FloatBuffer vertexBuffer, texCoordBuffer;
     private final float[] identityMatrix = new float[16];
-    { android.opengl.Matrix.setIdentityM(identityMatrix, 0); }
+    private final float[] flipMatrix = new float[16];
+    {
+        android.opengl.Matrix.setIdentityM(identityMatrix, 0);
+        android.opengl.Matrix.setIdentityM(flipMatrix, 0);
+        // FIX: Y-axis flip untuk output Canvas. Android Bitmap/Canvas (0,0) di top-left,
+        // sedangkan OpenGL (0,0) di bottom-left. Tanpa flip, hasil render Canvas ke GL
+        // akan terbalik vertikal (atas-bawah ketukar).
+        android.opengl.Matrix.scaleM(flipMatrix, 0, 1f, -1f, 1f);
+    }
 
     public CompositeSceneVideoSource(Context context, BackgroundType backgroundType,
                                      Bitmap backgroundImage, Uri backgroundVideoUri,
@@ -170,7 +178,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     public void stop() {
         running = false;
         if (drawThread != null) {
-            try { drawThread.join(500); } catch (InterruptedException ignored) {}
+            try { drawThread.join(1000); } catch (InterruptedException ignored) {}
+            drawThread = null;
         }
         if (backgroundVideoUri != null) {
             VideoCacheManager.getInstance().release(backgroundVideoUri);
@@ -182,10 +191,14 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         }
         videoLayerDecoders.clear();
 
-        if (targetSurface != null) {
-            targetSurface.release();
-            targetSurface = null;
-        }
+        // FIX "Handler on a dead thread": JANGAN langsung release targetSurface di sini.
+        // targetSurface membungkus SurfaceTexture milik Pedro's library. Jika di-release
+        // sebelum library selesai melakukan cleanup (misal black frame / tryClear),
+        // internal Handler di SurfaceTexture (yg dibuat di thread GL sebelumnya) akan
+        // komplain saat diakses. Biarkan GC yang membersihkan Surface wrapper ini,
+        // atau biarkan library Pedro yang mengelola siklus hidup SurfaceTexture-nya.
+        targetSurface = null;
+
         synchronized (overlayLock) {
             if (overlayBuffer != null) { overlayBuffer.recycle(); overlayBuffer = null; }
         }
@@ -236,29 +249,14 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         releaseGl();
     }
 
-    /** Gambar 1 bitmap frame screen-capture ke Canvas, dikoreksi orientasinya kalau perlu
-     *  (lihat FLIP_SCREEN_CAPTURE_VERTICALLY). Dipakai baik untuk background SCREEN maupun
-     *  layer SCREEN, supaya perilakunya konsisten di kedua tempat. */
+    /** Gambar 1 bitmap frame screen-capture ke Canvas. Orientasi sudah ditangani secara global
+     *  lewat flipMatrix saat render Canvas ke GL, jadi tidak perlu flip manual di sini lagi. */
     private static void drawScreenFrame(Canvas canvas, Bitmap frame, Rect dst, Paint paint) {
-        if (!FLIP_SCREEN_CAPTURE_VERTICALLY) {
-            canvas.drawBitmap(frame, null, dst, paint);
-            return;
-        }
-        canvas.save();
-        canvas.scale(1f, -1f, dst.centerX(), dst.centerY());
         canvas.drawBitmap(frame, null, dst, paint);
-        canvas.restore();
     }
 
     private static void drawScreenFrame(Canvas canvas, Bitmap frame, RectF dst, Paint paint) {
-        if (!FLIP_SCREEN_CAPTURE_VERTICALLY) {
-            canvas.drawBitmap(frame, null, dst, paint);
-            return;
-        }
-        canvas.save();
-        canvas.scale(1f, -1f, dst.centerX(), dst.centerY());
         canvas.drawBitmap(frame, null, dst, paint);
-        canvas.restore();
     }
 
     private void drawAllLayers(Paint paint) {
@@ -325,7 +323,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-        drawTexture(rgbaProgram, overlayTextureId, identityMatrix, false);
+        drawTexture(rgbaProgram, overlayTextureId, flipMatrix, false);
         GLES20.glDisable(GLES20.GL_BLEND);
 
         // Reset canvas for next batch if needed (though we currently erase at start of drawAllLayers)

@@ -188,7 +188,9 @@ public class AudioMixSource extends AudioSource {
     private void releaseRecord(AudioRecord record) {
         if (record == null) return;
         try {
-            record.stop();
+            if (record.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                record.stop();
+            }
         } catch (Exception ignored) {
         }
         record.release();
