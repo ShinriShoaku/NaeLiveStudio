@@ -1,545 +1,200 @@
 package ame.project.nlstudio.OBS;
 
 import android.content.Context;
-import android.graphics.Bitmap;
 import android.graphics.SurfaceTexture;
-import android.media.MediaCodec;
-import android.media.MediaExtractor;
-import android.media.MediaFormat;
 import android.net.Uri;
-import android.opengl.EGL14;
-import android.opengl.EGLConfig;
-import android.opengl.EGLContext;
-import android.opengl.EGLDisplay;
-import android.opengl.EGLSurface;
-import android.opengl.GLES11Ext;
-import android.opengl.GLES20;
 import android.os.Handler;
-import android.os.HandlerThread;
+import android.os.Looper;
 import android.util.Log;
 import android.view.Surface;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.nio.FloatBuffer;
+import androidx.annotation.OptIn;
+import androidx.media3.common.C;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.Player;
+import androidx.media3.common.util.UnstableApi;
+import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+/**
+ * REFACTORED: VideoTextureDecoder provides a detached SurfaceTexture for GPU compositing.
+ */
+@OptIn(markerClass = UnstableApi.class)
 public class VideoTextureDecoder {
+    private static final String TAG = "VideoDecoder-GPU";
 
     public interface Listener {
-        void onFrame(Bitmap bitmap);
-
-        /** Dipanggil sekali saat video sampai akhir DAN loop=false. Default no-op supaya
-         *  interface ini tetap functional interface (lambda lama seperti `bitmap -> {...}`
-         *  di CompositeSceneVideoSource tetap kompatibel tanpa perlu diubah). */
+        default void onFrameAvailable() {}
         default void onComplete() {}
-
-        /** Dipanggil kalau decoder gagal (misal file rusak/tidak didukung/tidak ada video track). */
         default void onError(Exception e) {}
     }
 
-    private static final String TAG = "VideoTextureDecoder";
-    private static final long DEQUEUE_TIMEOUT_US = 10_000L;
-
-    private static final String VERTEX_SHADER =
-            "uniform mat4 uTexMatrix;\n" +
-                    "attribute vec4 aPosition;\n" +
-                    "attribute vec4 aTextureCoord;\n" +
-                    "varying vec2 vTextureCoord;\n" +
-                    "void main() {\n" +
-                    // Y di-flip di sini karena glReadPixels membaca framebuffer dari bawah ke atas,
-                    // sedangkan Bitmap Android disimpan dari atas ke bawah. Flip ini mengkompensasi
-                    // itu supaya hasil akhir Bitmap orientasinya benar (tidak terbalik).
-                    "    gl_Position = vec4(aPosition.x, -aPosition.y, aPosition.z, aPosition.w);\n" +
-                    "    vTextureCoord = (uTexMatrix * aTextureCoord).xy;\n" +
-                    "}\n";
-
-    private static final String FRAGMENT_SHADER =
-            "#extension GL_OES_EGL_image_external : require\n" +
-                    "precision mediump float;\n" +
-                    "varying vec2 vTextureCoord;\n" +
-                    "uniform samplerExternalOES sTexture;\n" +
-                    "void main() {\n" +
-                    "    gl_FragColor = texture2D(sTexture, vTextureCoord);\n" +
-                    "}\n";
-
-    private static final float[] FULL_RECT_VERTICES = {
-            -1f, -1f,
-            1f, -1f,
-            -1f,  1f,
-            1f,  1f,
-    };
-    private static final float[] FULL_RECT_TEX_COORDS = {
-            0f, 0f,
-            1f, 0f,
-            0f, 1f,
-            1f, 1f,
-    };
-
     private final Context context;
     private final Uri videoUri;
-    private final int outWidth;
-    private final int outHeight;
+    private final int width, height;
     private final boolean loop;
-    private final Listener listener;
+    private Listener listener;
 
-    private HandlerThread glThread;
-    private Handler glHandler;
-    private Thread decodeThread;
-
-    private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
-    private EGLContext eglContext = EGL14.EGL_NO_CONTEXT;
-    private EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
-
-    private int oesTextureId;
+    private ExoPlayer exoPlayer;
     private SurfaceTexture surfaceTexture;
     private Surface inputSurface;
-    private MediaExtractor extractor;
-    private MediaCodec codec;
-
-    private int program;
-    private int aPositionLoc, aTexCoordLoc, uTexMatrixLoc;
-    private FloatBuffer vertexBuffer, texCoordBuffer;
-
-    private int fboId, fboTextureId;
-    private ByteBuffer readBuffer;
-    private final Bitmap[] outputBitmaps = new Bitmap[2];
-    private int bufferIndex = 0;
-
-    private final float[] texMatrix = new float[16];
     private volatile boolean running = false;
+    private boolean isAttached = false;
+    private final float[] texMatrix = new float[16];
 
-    /** Constructor lama, dipertahankan demi kompatibilitas (loop=true, dipakai CompositeSceneVideoSource). */
-    public VideoTextureDecoder(Context context, Uri videoUri, int outWidth, int outHeight, Listener listener) {
-        this(context, videoUri, outWidth, outHeight, true, listener);
-    }
-
-    /**
-     * @param loop true = video di-loop terus (seekTo(0)+flush() tiap EOS), streaming real-time.
-     *             false = decode SEKALI sampai habis lalu {@link Listener#onComplete()} dipanggil
-     *             dan tidak ada frame baru lagi - dipakai untuk pre-decode/caching sekali jalan.
-     */
-    public VideoTextureDecoder(Context context, Uri videoUri, int outWidth, int outHeight,
-                               boolean loop, Listener listener) {
-        this.context = context;
-        this.videoUri = videoUri;
-        this.outWidth = Math.max(2, outWidth);
-        this.outHeight = Math.max(2, outHeight);
+    public VideoTextureDecoder(Context context, Uri uri, int w, int h, boolean loop, int fps, Listener listener) {
+        this.context = context.getApplicationContext();
+        this.videoUri = uri;
+        this.width = Math.max(2, w);
+        this.height = Math.max(2, h);
         this.loop = loop;
         this.listener = listener;
     }
 
-    /** Mulai decode. Aman dipanggil dari thread manapun. */
-    public void start() {
-        glThread = new HandlerThread("VideoTextureDecoder-GL");
-        glThread.start();
-        glHandler = new Handler(glThread.getLooper());
-        glHandler.post(this::initGlAndDecoder);
+    public void setListener(Listener listener) {
+        this.listener = listener;
     }
 
-    /** Hentikan & release semua resource (EGL, GL, MediaCodec, MediaExtractor). Blocking singkat sampai selesai. */
+    public void start() {
+        if (running) return;
+        running = true;
+
+        // Create a detached SurfaceTexture
+        surfaceTexture = new SurfaceTexture(0);
+        surfaceTexture.detachFromGLContext();
+        surfaceTexture.setDefaultBufferSize(width, height);
+        inputSurface = new Surface(surfaceTexture);
+
+        surfaceTexture.setOnFrameAvailableListener(st -> {
+            if (listener != null && running) listener.onFrameAvailable();
+        });
+
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (!running) return;
+            try {
+                VideoDiskCacheManager cacheManager = VideoDiskCacheManager.getInstance(context);
+                exoPlayer = new ExoPlayer.Builder(context)
+                        .setMediaSourceFactory(new DefaultMediaSourceFactory(cacheManager.createCacheDataSourceFactory(context)))
+                        .build();
+
+                exoPlayer.setTrackSelectionParameters(
+                        exoPlayer.getTrackSelectionParameters().buildUpon()
+                                .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, true)
+                                .setMaxVideoSize(width, height)
+                                .build()
+                );
+
+                exoPlayer.setRepeatMode(loop ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
+                exoPlayer.setVideoSurface(inputSurface);
+                exoPlayer.setMediaItem(MediaItem.fromUri(videoUri));
+                exoPlayer.setPlayWhenReady(false);
+
+                exoPlayer.addListener(new Player.Listener() {
+                    @Override
+                    public void onPlaybackStateChanged(int state) {
+                        if (state == Player.STATE_ENDED && !loop) {
+                            if (listener != null) listener.onComplete();
+                        }
+                    }
+                    @Override
+                    public void onPlayerError(androidx.media3.common.PlaybackException error) {
+                        if (listener != null) listener.onError(error);
+                    }
+                });
+
+                exoPlayer.prepare();
+            } catch (Exception e) {
+                if (listener != null) listener.onError(e);
+            }
+        });
+    }
+
+    public void attachToGLContext(int texId) {
+        if (surfaceTexture != null && !isAttached) {
+            try {
+                surfaceTexture.attachToGLContext(texId);
+                isAttached = true;
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to attach SurfaceTexture to GL context", e);
+            }
+        }
+    }
+
+    public void detachFromGLContext() {
+        if (surfaceTexture != null && isAttached) {
+            try {
+                surfaceTexture.detachFromGLContext();
+                isAttached = false;
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to detach SurfaceTexture from GL context", e);
+            }
+        }
+    }
+
+    public void updateTexImage() {
+        if (surfaceTexture != null && isAttached) {
+            try {
+                surfaceTexture.updateTexImage();
+                surfaceTexture.getTransformMatrix(texMatrix);
+            } catch (Exception e) {
+                Log.w(TAG, "updateTexImage failed: " + e.getMessage());
+            }
+        }
+    }
+
+    public float[] getTexMatrix() { return texMatrix; }
+
+    public void setPlayWhenReady(boolean play) {
+        if (exoPlayer != null) {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                if (exoPlayer != null) exoPlayer.setPlayWhenReady(play);
+            });
+        }
+    }
+
     public void stop() {
         running = false;
 
-        if (decodeThread != null) {
-            decodeThread.interrupt();
-            try {
-                decodeThread.join(500);
-            } catch (InterruptedException ignored) {}
-            if (decodeThread.isAlive()) {
-                // Jarang terjadi, tapi kalau sampai ke sini JANGAN lanjut release codec dari thread
-                // lain sementara decodeThread masih hidup - MediaCodec TIDAK aman diakses dari 2
-                // thread sekaligus (dequeueOutputBuffer di decodeThread vs stop()/release() di
-                // glHandler). Device Android 14 lebih ketat soal ini dibanding Android 12 (yang
-                // cenderung diam-diam mentolerir race ini). Cukup log, resource-nya akan ke-GC lewat
-                // finalizer MediaCodec kalau memang bocor - lebih aman daripada crash/corrupt state.
-                Log.w(TAG, "stop(): decodeThread belum berhenti setelah 500ms, skip release codec paksa");
-            }
-            decodeThread = null;
-        }
-
-        final Handler handler = glHandler;
-        if (handler != null) {
-            if (handler.getLooper().getThread() == Thread.currentThread()) {
-                // FIX DEADLOCK: Jika dipanggil dari thread GL sendiri (misal dari onFrame callback),
-                // langsung eksekusi release tanpa post & wait.
-                releaseGlAndCodec();
+        final ExoPlayer player = exoPlayer;
+        exoPlayer = null;
+        if (player != null) {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                // PENTING: kalau stop() ini sendiri sudah dipanggil DARI main thread, jangan
+                // post+await ke main thread juga - itu self-deadlock (runnable yang di-post
+                // tidak akan pernah jalan selama thread ini masih nunggu di await(), jadi selalu
+                // kena timeout penuh). Karena sudah di main thread, langsung release saja.
+                releasePlayerSafely(player);
             } else {
-                final Object lock = new Object();
-                final boolean[] done = {false};
-                synchronized (lock) {
-                    handler.post(() -> {
-                        releaseGlAndCodec();
-                        synchronized (lock) {
-                            done[0] = true;
-                            lock.notifyAll();
-                        }
-                    });
-                    try {
-                        // FIX ANDROID 14: MediaCodec.stop()/release() utk hardware decoder bisa
-                        // makan waktu lebih lama di sini dibanding Android 12 (driver/HAL lebih
-                        // ketat soal teardown codec). 200ms dulu kadang belum cukup -> release()
-                        // masih jalan di background pas kode lanjut ganti scene, resource sempat
-                        // tumpang-tindih. Dinaikkan ke 500ms; caller (switchScene) sudah jalan di
-                        // sceneSwitchExecutor (background thread), jadi aman sedikit lebih lama,
-                        // tidak menyebabkan ANR.
-                        if (!done[0]) lock.wait(500);
-                        if (!done[0]) {
-                            Log.w(TAG, "stop(): releaseGlAndCodec belum selesai setelah 500ms, lanjut tanpa menunggu");
-                        }
-                    } catch (InterruptedException ignored) {}
-                }
+                CountDownLatch latch = new CountDownLatch(1);
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    releasePlayerSafely(player);
+                    latch.countDown();
+                });
+                try { latch.await(800, TimeUnit.MILLISECONDS); } catch (InterruptedException ignored) {}
             }
         }
-        if (glThread != null) {
-            glThread.quitSafely();
-            glThread = null;
-        }
-        glHandler = null;
-    }
 
-    private void initGlAndDecoder() {
-        try {
-            setupEgl();
-            setupGlResources();
-
-            int[] textures = new int[1];
-            GLES20.glGenTextures(1, textures, 0);
-            oesTextureId = textures[0];
-            surfaceTexture = new SurfaceTexture(oesTextureId);
-            surfaceTexture.setDefaultBufferSize(outWidth, outHeight);
-            inputSurface = new Surface(surfaceTexture);
-
-            surfaceTexture.setOnFrameAvailableListener(st -> {
-                Handler h = glHandler;
-                if (h != null) h.post(this::drawFrame);
-            }, glHandler);
-
-            setupExtractorAndCodec();
-
-            running = true;
-            decodeThread = new Thread(this::decodeLoop, "VideoTextureDecoder-codec");
-            decodeThread.start();
-        } catch (Exception e) {
-            Log.e(TAG, "initGlAndDecoder gagal", e);
-            if (listener != null) listener.onError(e);
-        }
-    }
-
-    /**
-     * Siapkan MediaExtractor + MediaCodec buat decode VIDEO TRACK SAJA. Audio track (kalau ada
-     * di file itu) SENGAJA tidak pernah di-selectTrack() - lihat penjelasan lengkap di komentar
-     * class ini kenapa ini penting (mencegah audio "bocor" ke recording).
-     */
-    private void setupExtractorAndCodec() throws IOException {
-        extractor = new MediaExtractor();
-        extractor.setDataSource(context, videoUri, null);
-
-        int videoTrackIndex = -1;
-        MediaFormat videoFormat = null;
-        int trackCount = extractor.getTrackCount();
-        for (int i = 0; i < trackCount; i++) {
-            MediaFormat f = extractor.getTrackFormat(i);
-            String mime = f.getString(MediaFormat.KEY_MIME);
-            if (mime != null && mime.startsWith("video/")) {
-                videoTrackIndex = i;
-                videoFormat = f;
-                break;
-            }
-        }
-        if (videoTrackIndex < 0 || videoFormat == null) {
-            throw new IOException("Tidak ada video track di file: " + videoUri);
-        }
-        extractor.selectTrack(videoTrackIndex);
-
-        String mime = videoFormat.getString(MediaFormat.KEY_MIME);
-        codec = MediaCodec.createDecoderByType(mime);
-        codec.configure(videoFormat, inputSurface, null, 0);
-        codec.start();
-    }
-
-    /**
-     * Loop decode manual: feed compressed data dari extractor ke codec, ambil output yang sudah
-     * didecode, render ke inputSurface (yang mentrigger onFrameAvailable -> drawFrame() di
-     * glHandler). Pacing pakai presentationTimeUs asli dari video biar kecepatan playback benar
-     * (bukan secepat mungkin decode terus, yang bisa bikin drop frame/salah kecepatan).
-     */
-    private void decodeLoop() {
-        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-        boolean inputEos = false;
-        long startTimeNs = -1;
-
-        try {
-            while (running) {
-                if (!inputEos) {
-                    int inIndex = codec.dequeueInputBuffer(DEQUEUE_TIMEOUT_US);
-                    if (inIndex >= 0) {
-                        ByteBuffer inBuf = codec.getInputBuffer(inIndex);
-                        int sampleSize = inBuf != null ? extractor.readSampleData(inBuf, 0) : -1;
-                        if (sampleSize < 0) {
-                            codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            inputEos = true;
-                        } else {
-                            long ptsUs = extractor.getSampleTime();
-                            codec.queueInputBuffer(inIndex, 0, sampleSize, ptsUs, 0);
-                            extractor.advance();
-                        }
-                    }
-                }
-
-                int outIndex = codec.dequeueOutputBuffer(info, DEQUEUE_TIMEOUT_US);
-                if (outIndex >= 0) {
-                    boolean render = info.size > 0;
-                    // FIX DELAY SAAT GANTI SCENE: pacing ke presentationTimeUs HANYA perlu untuk
-                    // mode loop=true (live-streaming, frame ditampilkan LANGSUNG ke penonton -
-                    // harus jalan sesuai kecepatan video aslinya). Mode loop=false SELALU dipakai
-                    // untuk PREFETCH/CACHE SEKALI JALAN (lihat VideoCacheManager, dan
-                    // startVideoBackgroundLoop()/startVideoPlayback() di Composite/FakeSceneVideoSource)
-                    // - di situ hasil decode cuma disimpan ke array Bitmap RAM, TIDAK ditonton
-                    // langsung, jadi pacing di sini cuma buang-buang waktu. Sebelumnya baris di
-                    // bawah ini jalan utk KEDUA mode, akibatnya nge-cache video durasi 10 detik
-                    // makan waktu ~10 detik juga (secepat playback aslinya) - padahal decoder
-                    // hardware sanggup jauh lebih cepat. Ini penyebab video "freeze"/tidak jalan
-                    // beberapa detik pas ganti scene: selama itu prefetch masih realtime-pacing.
-                    // Sekarang kalau loop=false, decode FLAT OUT secepat mungkin.
-                    if (render && loop) {
-                        if (startTimeNs < 0) {
-                            startTimeNs = System.nanoTime() - info.presentationTimeUs * 1000L;
-                        }
-                        long ptsNs = startTimeNs + info.presentationTimeUs * 1000L;
-                        long delayNs = ptsNs - System.nanoTime();
-                        if (delayNs > 0) {
-                            try {
-                                Thread.sleep(delayNs / 1_000_000L, (int) (delayNs % 1_000_000L));
-                            } catch (InterruptedException e) {
-                                codec.releaseOutputBuffer(outIndex, false);
-                                break;
-                            }
-                        }
-                    }
-                    codec.releaseOutputBuffer(outIndex, render);
-
-                    boolean eos = (info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
-                    if (eos) {
-                        if (loop && running) {
-                            extractor.seekTo(0, MediaExtractor.SEEK_TO_CLOSEST_SYNC);
-                            codec.flush();
-                            inputEos = false;
-                            startTimeNs = -1;
-                        } else {
-                            running = false;
-                            if (listener != null) listener.onComplete();
-                            break;
-                        }
-                    }
-                }
-                // INFO_TRY_AGAIN_LATER / INFO_OUTPUT_FORMAT_CHANGED / INFO_OUTPUT_BUFFERS_CHANGED:
-                // tidak perlu penanganan khusus buat kasus pemakaian kita (output selalu ke Surface).
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "decodeLoop error", e);
-            if (listener != null) listener.onError(e);
-        }
-    }
-
-    private void setupEgl() {
-        eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
-        if (eglDisplay == EGL14.EGL_NO_DISPLAY) throw new RuntimeException("eglGetDisplay gagal");
-        int[] version = new int[2];
-        if (!EGL14.eglInitialize(eglDisplay, version, 0, version, 1)) {
-            throw new RuntimeException("eglInitialize gagal");
-        }
-        int[] attribList = {
-                EGL14.EGL_RED_SIZE, 8,
-                EGL14.EGL_GREEN_SIZE, 8,
-                EGL14.EGL_BLUE_SIZE, 8,
-                EGL14.EGL_ALPHA_SIZE, 8,
-                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
-                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_PBUFFER_BIT,
-                EGL14.EGL_NONE
-        };
-        EGLConfig[] configs = new EGLConfig[1];
-        int[] numConfigs = new int[1];
-        if (!EGL14.eglChooseConfig(eglDisplay, attribList, 0, configs, 0, 1, numConfigs, 0) || numConfigs[0] == 0) {
-            throw new RuntimeException("eglChooseConfig gagal");
-        }
-        int[] ctxAttribs = { EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE };
-        eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttribs, 0);
-        if (eglContext == EGL14.EGL_NO_CONTEXT) throw new RuntimeException("eglCreateContext gagal");
-
-        int[] pbufAttribs = { EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE };
-        eglSurface = EGL14.eglCreatePbufferSurface(eglDisplay, configs[0], pbufAttribs, 0);
-        if (eglSurface == EGL14.EGL_NO_SURFACE) throw new RuntimeException("eglCreatePbufferSurface gagal");
-
-        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
-            throw new RuntimeException("eglMakeCurrent gagal");
-        }
-    }
-
-    private void setupGlResources() {
-        program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER);
-        aPositionLoc = GLES20.glGetAttribLocation(program, "aPosition");
-        aTexCoordLoc = GLES20.glGetAttribLocation(program, "aTextureCoord");
-        uTexMatrixLoc = GLES20.glGetUniformLocation(program, "uTexMatrix");
-
-        vertexBuffer = ByteBuffer.allocateDirect(FULL_RECT_VERTICES.length * 4)
-                .order(ByteOrder.nativeOrder()).asFloatBuffer();
-        vertexBuffer.put(FULL_RECT_VERTICES).position(0);
-
-        texCoordBuffer = ByteBuffer.allocateDirect(FULL_RECT_TEX_COORDS.length * 4)
-                .order(ByteOrder.nativeOrder()).asFloatBuffer();
-        texCoordBuffer.put(FULL_RECT_TEX_COORDS).position(0);
-
-        int[] fbo = new int[1];
-        GLES20.glGenFramebuffers(1, fbo, 0);
-        fboId = fbo[0];
-
-        int[] tex = new int[1];
-        GLES20.glGenTextures(1, tex, 0);
-        fboTextureId = tex[0];
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fboTextureId);
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, outWidth, outHeight, 0,
-                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, null);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId);
-        GLES20.glFramebufferTexture2D(GLES20.GL_FRAMEBUFFER, GLES20.GL_COLOR_ATTACHMENT0,
-                GLES20.GL_TEXTURE_2D, fboTextureId, 0);
-        int status = GLES20.glCheckFramebufferStatus(GLES20.GL_FRAMEBUFFER);
-        if (status != GLES20.GL_FRAMEBUFFER_COMPLETE) {
-            Log.e(TAG, "FBO tidak lengkap, status=" + status);
-        }
-        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-
-        readBuffer = ByteBuffer.allocateDirect(outWidth * outHeight * 4).order(ByteOrder.nativeOrder());
-        outputBitmaps[0] = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888);
-        outputBitmaps[1] = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888);
-    }
-
-    private int buildProgram(String vertexSrc, String fragmentSrc) {
-        int vs = compileShader(GLES20.GL_VERTEX_SHADER, vertexSrc);
-        int fs = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSrc);
-        int prog = GLES20.glCreateProgram();
-        GLES20.glAttachShader(prog, vs);
-        GLES20.glAttachShader(prog, fs);
-        GLES20.glLinkProgram(prog);
-        int[] linkStatus = new int[1];
-        GLES20.glGetProgramiv(prog, GLES20.GL_LINK_STATUS, linkStatus, 0);
-        if (linkStatus[0] != GLES20.GL_TRUE) {
-            String log = GLES20.glGetProgramInfoLog(prog);
-            GLES20.glDeleteProgram(prog);
-            throw new RuntimeException("Link program gagal: " + log);
-        }
-        return prog;
-    }
-
-    private int compileShader(int type, String src) {
-        int shader = GLES20.glCreateShader(type);
-        GLES20.glShaderSource(shader, src);
-        GLES20.glCompileShader(shader);
-        int[] compiled = new int[1];
-        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compiled, 0);
-        if (compiled[0] == 0) {
-            String log = GLES20.glGetShaderInfoLog(shader);
-            GLES20.glDeleteShader(shader);
-            throw new RuntimeException("Compile shader gagal: " + log);
-        }
-        return shader;
-    }
-
-    private void drawFrame() {
-        if (!running || surfaceTexture == null) return;
-        try {
-            surfaceTexture.updateTexImage();
-            surfaceTexture.getTransformMatrix(texMatrix);
-
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, fboId);
-            GLES20.glViewport(0, 0, outWidth, outHeight);
-            GLES20.glClearColor(0f, 0f, 0f, 1f);
-            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
-
-            GLES20.glUseProgram(program);
-
-            GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId);
-
-            vertexBuffer.position(0);
-            GLES20.glEnableVertexAttribArray(aPositionLoc);
-            GLES20.glVertexAttribPointer(aPositionLoc, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
-
-            texCoordBuffer.position(0);
-            GLES20.glEnableVertexAttribArray(aTexCoordLoc);
-            GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
-
-            GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, texMatrix, 0);
-
-            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
-
-            GLES20.glDisableVertexAttribArray(aPositionLoc);
-            GLES20.glDisableVertexAttribArray(aTexCoordLoc);
-
-            readBuffer.rewind();
-            GLES20.glReadPixels(0, 0, outWidth, outHeight, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, readBuffer);
-            readBuffer.rewind();
-
-            // Tulis ke buffer yang TIDAK sedang dibaca (double buffer), baru swap referensi.
-            Bitmap target = outputBitmaps[bufferIndex];
-            target.copyPixelsFromBuffer(readBuffer);
-            bufferIndex = 1 - bufferIndex;
-
-            GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0);
-
-            if (listener != null) listener.onFrame(target);
-        } catch (Exception e) {
-            Log.e(TAG, "drawFrame error", e);
-        }
-    }
-
-    private void releaseGlAndCodec() {
-        running = false;
-        if (codec != null) {
-            try { codec.stop(); } catch (Exception ignored) {}
-            try { codec.release(); } catch (Exception ignored) {}
-            codec = null;
-        }
-        if (extractor != null) {
-            try { extractor.release(); } catch (Exception ignored) {}
-            extractor = null;
-        }
         if (inputSurface != null) {
             inputSurface.release();
             inputSurface = null;
         }
         if (surfaceTexture != null) {
+            surfaceTexture.setOnFrameAvailableListener(null);
             surfaceTexture.release();
             surfaceTexture = null;
         }
-        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
-            if (eglSurface != EGL14.EGL_NO_SURFACE) EGL14.eglDestroySurface(eglDisplay, eglSurface);
-            if (eglContext != EGL14.EGL_NO_CONTEXT) EGL14.eglDestroyContext(eglDisplay, eglContext);
-            // FIX BLACKSCREEN GANTI SCENE (khusus Android 14): JANGAN panggil eglTerminate(eglDisplay)
-            // di sini. eglDisplay = eglGetDisplay(EGL_DEFAULT_DISPLAY) adalah SATU koneksi display
-            // yang DI-SHARE UNTUK SELURUH PROSES APP - bukan cuma milik VideoTextureDecoder ini.
-            // RootEncoder (GlStreamInterface, yang me-render composite scene ke encoder RTMP) JUGA
-            // pakai EGL_DEFAULT_DISPLAY yang SAMA di context terpisah. eglTerminate() mematikan
-            // koneksi DISPLAY itu untuk SEMUA context yang masih memakainya, bukan cuma punya kita.
-            // Sebelumnya, tiap kali scene dengan background VIDEO di-stop() (ganti ke scene lain),
-            // baris ini ikut merusak context GL milik RootEncoder yang masih aktif -> hasil render
-            // scene BERIKUTNYA jadi rusak/black screen. Driver GPU Android 12 (lama) cenderung
-            // "menoleransi" eglTerminate yang sembarangan ini (efeknya nyaris tak terlihat), tapi
-            // driver Android 14 (lebih baru/strict) langsung meng-invalidate display beneran ->
-            // muncul persis sebagai black screen setelah ganti scene, hanya di Android 14.
-            // Cukup destroy context+surface milik context INI SENDIRI (baris di atas) - TIDAK
-            // PERLU eglTerminate sama sekali; display akan dibersihkan otomatis oleh sistem saat
-            // proses app berakhir.
+        isAttached = false;
+    }
+
+    private void releasePlayerSafely(ExoPlayer player) {
+        try {
+            player.stop();
+            player.release();
+        } catch (Exception e) {
+            Log.w(TAG, "Error releasing ExoPlayer", e);
         }
-        eglDisplay = EGL14.EGL_NO_DISPLAY;
-        eglContext = EGL14.EGL_NO_CONTEXT;
-        eglSurface = EGL14.EGL_NO_SURFACE;
     }
 }

@@ -148,38 +148,6 @@
             android:background="#333"
             android:layout_marginBottom="16dp" />
 
-        <!-- ===================== ROOT LAYOUT ===================== -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="ROOT LAYOUT / RESOLUSI"
-            android:textColor="#7FD8A6"
-            android:textStyle="bold"
-            android:textSize="12sp"
-            android:layout_marginBottom="8dp" />
-
-        <Spinner
-            android:id="@+id/spinnerRootLayout"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:backgroundTint="#FFFFFF"
-            android:layout_marginBottom="16dp" />
-
-        <Button
-            android:id="@+id/btnApplyRootPreset"
-            style="@style/SecondaryButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp"
-            android:textSize="11sp"
-            android:text="Terapkan Preset (misal: Game di Tengah)" />
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:background="#333"
-            android:layout_marginBottom="16dp" />
-
         <!-- ===================== SIMPAN SCENE ===================== -->
         <TextView
             android:layout_width="wrap_content"

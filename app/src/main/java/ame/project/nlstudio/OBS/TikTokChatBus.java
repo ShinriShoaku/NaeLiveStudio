@@ -5,6 +5,8 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.ContextThemeWrapper;
 import android.view.Gravity;
 import android.view.LayoutInflater;
@@ -214,29 +216,38 @@ public class TikTokChatBus {
             cachedChatBitmap.eraseColor(Color.TRANSPARENT);
         }
 
-        Canvas canvas = new Canvas(cachedChatBitmap);
-        Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
+        final Bitmap targetBitmap = cachedChatBitmap;
+        final int targetW = w;
+        final int targetH = h;
 
-        // Root container untuk menampung bubble chat
-        LinearLayout container = new LinearLayout(themeContext);
-        container.setOrientation(LinearLayout.VERTICAL);
-        container.setGravity(Gravity.BOTTOM);
-        container.setLayoutParams(new ViewGroup.LayoutParams(w, h));
+        // FIX: Rendering views to bitmap HARUS di UI thread untuk menghindari Resources$NotFoundException
+        // (ResourcesOffloading) dan race condition pada LayoutInflater/View drawing di Android 13+.
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (targetBitmap.isRecycled()) return;
+            Canvas canvas = new Canvas(targetBitmap);
+            Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
 
-        LayoutInflater inflater = LayoutInflater.from(context);
-        for (ChatEntry entry : snapshot) {
-            View view = inflater.inflate(R.layout.item_chat_bubble_boxed, container, false);
-            TextView tvUser = view.findViewById(R.id.tv_username);
-            TextView tvMsg = view.findViewById(R.id.tv_message);
-            if (tvUser != null) tvUser.setText(entry.user);
-            if (tvMsg != null) tvMsg.setText(entry.message);
-            container.addView(view);
-        }
+            // Root container untuk menampung bubble chat
+            LinearLayout container = new LinearLayout(themeContext);
+            container.setOrientation(LinearLayout.VERTICAL);
+            container.setGravity(Gravity.BOTTOM);
+            container.setLayoutParams(new ViewGroup.LayoutParams(targetW, targetH));
 
-        container.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
-        container.layout(0, 0, w, h);
-        container.draw(canvas);
+            LayoutInflater inflater = LayoutInflater.from(themeContext);
+            for (ChatEntry entry : snapshot) {
+                View view = inflater.inflate(R.layout.item_chat_bubble_boxed, container, false);
+                TextView tvUser = view.findViewById(R.id.tv_username);
+                TextView tvMsg = view.findViewById(R.id.tv_message);
+                if (tvUser != null) tvUser.setText(entry.user);
+                if (tvMsg != null) tvMsg.setText(entry.message);
+                container.addView(view);
+            }
+
+            container.measure(View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
+            container.layout(0, 0, targetW, targetH);
+            container.draw(canvas);
+        });
 
         return cachedChatBitmap;
     }
@@ -260,36 +271,47 @@ public class TikTokChatBus {
             cachedGiftBitmap.eraseColor(Color.TRANSPARENT);
         }
 
-        Canvas canvas = new Canvas(cachedGiftBitmap);
-        lastGiftRenderedTs = lastGiftTimestamp;
+        final Bitmap targetBitmap = cachedGiftBitmap;
+        final int targetW = w;
+        final int targetH = h;
+        final long timestamp = lastGiftTimestamp;
+        final String user = lastGiftUser;
+        final String giftName = lastGiftName;
+        final int giftCount = lastGiftCount;
+        final String giftUrl = lastGiftUrl;
 
-        Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
-        View view = LayoutInflater.from(themeContext).inflate(R.layout.overlay_tiktok_notification, null);
-        TextView tvUser = view.findViewById(R.id.tiktok_notif_user);
-        TextView tvAction = view.findViewById(R.id.tiktok_notif_action);
-        ImageView ivGift = view.findViewById(R.id.tiktok_notif_image);
+        lastGiftRenderedTs = timestamp;
 
-        if (tvUser != null) tvUser.setText(lastGiftUser);
-        if (tvAction != null) tvAction.setText(lastGiftName + " x" + lastGiftCount);
-        if (ivGift != null) {
-            Bitmap giftBmp = getCachedImage(lastGiftUrl);
-            if (giftBmp != null) {
-                ivGift.setImageBitmap(giftBmp);
-            } else {
-                // Try to get 'kanae' from sdk or use default
-                int resId = context.getResources().getIdentifier("kanae", "drawable", context.getPackageName());
-                if (resId != 0) {
-                    ivGift.setImageResource(resId);
+        new Handler(Looper.getMainLooper()).post(() -> {
+            if (targetBitmap.isRecycled()) return;
+            Canvas canvas = new Canvas(targetBitmap);
+            Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
+            View view = LayoutInflater.from(themeContext).inflate(R.layout.overlay_tiktok_notification, null);
+            TextView tvUser = view.findViewById(R.id.tiktok_notif_user);
+            TextView tvAction = view.findViewById(R.id.tiktok_notif_action);
+            ImageView ivGift = view.findViewById(R.id.tiktok_notif_image);
+
+            if (tvUser != null) tvUser.setText(user);
+            if (tvAction != null) tvAction.setText(giftName + " x" + giftCount);
+            if (ivGift != null) {
+                Bitmap giftBmp = getCachedImage(giftUrl);
+                if (giftBmp != null) {
+                    ivGift.setImageBitmap(giftBmp);
                 } else {
-                    ivGift.setImageResource(android.R.drawable.ic_menu_gallery);
+                    int resId = context.getResources().getIdentifier("kanae", "drawable", context.getPackageName());
+                    if (resId != 0) {
+                        ivGift.setImageResource(resId);
+                    } else {
+                        ivGift.setImageResource(android.R.drawable.ic_menu_gallery);
+                    }
                 }
             }
-        }
 
-        view.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
-        view.layout(0, 0, w, h);
-        view.draw(canvas);
+            view.measure(View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
+            view.layout(0, 0, targetW, targetH);
+            view.draw(canvas);
+        });
 
         return cachedGiftBitmap;
     }
@@ -315,44 +337,54 @@ public class TikTokChatBus {
             cachedJoinBitmap.eraseColor(Color.TRANSPARENT);
         }
 
-        Canvas canvas = new Canvas(cachedJoinBitmap);
-        lastJoinRenderedTs = lastJoinTimestamp;
+        final Bitmap targetBitmap = cachedJoinBitmap;
+        final int targetW = w;
+        final int targetH = h;
+        final long timestamp = lastJoinTimestamp;
+        final String user = lastJoinUser;
+        final String profileUrl = lastJoinProfileUrl;
 
-        try {
-            Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
-            View view = LayoutInflater.from(themeContext).inflate(R.layout.overlay_tiktok_join, null);
-            TextView tvUser = view.findViewById(R.id.join_user_text);
-            ImageView ivJoin = view.findViewById(R.id.join_user_image);
+        lastJoinRenderedTs = timestamp;
 
-            if (tvUser != null) {
-                tvUser.setText(lastJoinUser + " joined");
-            } else {
-                android.util.Log.e("TikTokChatBus", "TextView join_user_text NOT FOUND in layout!");
-            }
-            
-            if (ivJoin != null) {
-                Bitmap profileBmp = getCachedImage(lastJoinProfileUrl);
-                if (profileBmp != null) {
-                    ivJoin.setImageBitmap(profileBmp);
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                if (targetBitmap.isRecycled()) return;
+                Canvas canvas = new Canvas(targetBitmap);
+                Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
+                View view = LayoutInflater.from(themeContext).inflate(R.layout.overlay_tiktok_join, null);
+                TextView tvUser = view.findViewById(R.id.join_user_text);
+                ImageView ivJoin = view.findViewById(R.id.join_user_image);
+
+                if (tvUser != null) {
+                    tvUser.setText(user + " joined");
                 } else {
-                    int resId = context.getResources().getIdentifier("kanae", "drawable", context.getPackageName());
-                    if (resId != 0) {
-                        ivJoin.setImageResource(resId);
+                    android.util.Log.e("TikTokChatBus", "TextView join_user_text NOT FOUND in layout!");
+                }
+                
+                if (ivJoin != null) {
+                    Bitmap profileBmp = getCachedImage(profileUrl);
+                    if (profileBmp != null) {
+                        ivJoin.setImageBitmap(profileBmp);
                     } else {
-                        ivJoin.setImageResource(android.R.drawable.ic_menu_gallery);
+                        int resId = context.getResources().getIdentifier("kanae", "drawable", context.getPackageName());
+                        if (resId != 0) {
+                            ivJoin.setImageResource(resId);
+                        } else {
+                            ivJoin.setImageResource(android.R.drawable.ic_menu_gallery);
+                        }
                     }
                 }
-            }
 
-            view.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
-            view.layout(0, 0, w, h);
-            view.draw(canvas);
-            
-            android.util.Log.d("TikTokChatBus", "Join Overlay drawn successfully");
-        } catch (Exception e) {
-            android.util.Log.e("TikTokChatBus", "Error inflating/drawing join overlay", e);
-        }
+                view.measure(View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
+                view.layout(0, 0, targetW, targetH);
+                view.draw(canvas);
+                
+                android.util.Log.d("TikTokChatBus", "Join Overlay drawn successfully");
+            } catch (Exception e) {
+                android.util.Log.e("TikTokChatBus", "Error inflating/drawing join overlay", e);
+            }
+        });
 
         return cachedJoinBitmap;
     }

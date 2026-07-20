@@ -111,6 +111,14 @@
             android:entries="@array/encoder_types"
             android:layout_marginBottom="12dp" />
 
+        <TextView style="@style/LabelText" android:text="@string/label_video_bg_scale" />
+        <Spinner
+            android:id="@+id/spinnerVideoBgScale"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:entries="@array/video_bg_scale_options"
+            android:layout_marginBottom="12dp" />
+
         <TextView style="@style/LabelText"
             android:text="Tangkap audio dari" />
         <Spinner

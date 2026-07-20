@@ -271,7 +271,9 @@ class SceneRepository(private val context: Context) {
     }
 
     private fun renderScreenPlaceholder(): Bitmap {
-        val bmp = Bitmap.createBitmap(160, 90, Bitmap.Config.ARGB_8888)
+        val w = 160
+        val h = (160 / (displayMetrics.widthPixels.toFloat() / displayMetrics.heightPixels)).toInt()
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
         canvas.drawColor(Color.DKGRAY)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -279,7 +281,7 @@ class SceneRepository(private val context: Context) {
             textSize = 20f
             textAlign = Paint.Align.CENTER
         }
-        canvas.drawText("LAYAR HP", 80f, 55f, paint)
+        canvas.drawText("LAYAR HP", w / 2f, h / 2f + 10f, paint)
         return bmp
     }
 

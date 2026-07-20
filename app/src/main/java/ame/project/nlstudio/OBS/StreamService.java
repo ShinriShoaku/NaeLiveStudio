@@ -91,7 +91,8 @@ public class StreamService extends Service implements ConnectChecker {
     private HandlerThread globalScreenThread;
     private Bitmap globalScreenBitmap;
     private final Object globalScreenLock = new Object();
-    private int globalCapW, globalCapH;
+    private int globalCapW = 720;
+    private int globalCapH = 1280;
 
     /**
      * Diagnostik pakai reflection: dump semua method getter yang namanya mengandung
@@ -362,8 +363,8 @@ public class StreamService extends Service implements ConnectChecker {
         kanaeBound = false;
     }
 
-    private void startGlobalScreenCapture(MediaProjection mp) {
-        if (globalVirtualDisplay != null) return;
+    public void startGlobalScreenCapture(MediaProjection mp) {
+        if (globalVirtualDisplay != null || mp == null) return;
         Log.d(TAG, "startGlobalScreenCapture: initializing VirtualDisplay for Android 14+");
 
         DisplayMetrics metrics = getResources().getDisplayMetrics();
@@ -402,6 +403,12 @@ public class StreamService extends Service implements ConnectChecker {
         }, handler);
     }
 
+    public void ensureGlobalScreenCapture() {
+        if (globalVirtualDisplay == null && savedMediaProjection != null) {
+            startGlobalScreenCapture(savedMediaProjection);
+        }
+    }
+
     private void updateGlobalScreenBitmap(Image image) {
         try {
             Image.Plane[] planes = image.getPlanes();
@@ -415,6 +422,7 @@ public class StreamService extends Service implements ConnectChecker {
                 if (globalScreenBitmap == null || globalScreenBitmap.getWidth() != bitmapWidth || globalScreenBitmap.getHeight() != image.getHeight()) {
                     if (globalScreenBitmap != null) globalScreenBitmap.recycle();
                     globalScreenBitmap = Bitmap.createBitmap(bitmapWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
+                    Log.d(TAG, "Created globalScreenBitmap: " + bitmapWidth + "x" + image.getHeight());
                 }
                 buffer.rewind();
                 globalScreenBitmap.copyPixelsFromBuffer(buffer);
@@ -512,13 +520,6 @@ public class StreamService extends Service implements ConnectChecker {
                         width = rootW;
                         height = rootH;
                     }
-
-                    // Trigger prefetch untuk video background jika ada
-                    String bgUri = o.optString("backgroundUri", null);
-                    if ("VIDEO".equals(o.optString("backgroundType")) && bgUri != null) {
-                        VideoCacheManager.getInstance().prefetch(this, Uri.parse(bgUri),
-                                width, height, fps, 250L * 1024 * 1024, null);
-                    }
                 } catch (Exception e) {
                     Log.e(TAG, "onStartCommand: gagal parse sceneJson buat intip rootWidth/Height", e);
                 }
@@ -555,10 +556,8 @@ public class StreamService extends Service implements ConnectChecker {
                     + savedWidth + "x" + savedHeight + " (orientation="
                     + (savedWidth > savedHeight ? "LANDSCAPE" : "PORTRAIT") + ")");
 
-            // FIX SMOOTHNESS: mulai pre-warm cache video background SEMUA scene di sini, sebelum
-            // user sempat pindah scene sama sekali - lihat komentar lengkap di
-            // prewarmAllVideoBackgroundCaches().
-            prewarmAllVideoBackgroundCaches();
+            // REMOVED prewarmAllVideoBackgroundCaches() to reduce UI lag during stream start.
+            // Precaching is now explicitly handled in MainActivity with a progress dialog.
 
             if (ACTION_START.equals(action)) {
                 String rtmpUrl = intent.getStringExtra(EXTRA_RTMP_URL);
@@ -646,6 +645,7 @@ public class StreamService extends Service implements ConnectChecker {
             try {
                 applyCompositeScene(initialSceneJson, null);
             } catch (Exception e) {
+                Log.e(TAG, "Gagal apply initial composite scene, falling back to screen", e);
                 applyInitialScreenSource(null);
             }
         } else {
@@ -713,70 +713,6 @@ public class StreamService extends Service implements ConnectChecker {
      * bikin decoder, DAN changeVideoSource() itu sendiri) dipindah ke sceneSwitchExecutor
      * (single background thread, urut - tidak akan ada 2 switch tumpang tindih).
      */
-    /**
-     * FIX SMOOTHNESS: Sebelumnya video background baru mulai di-decode & di-cache begitu user
-     * PINDAH ke scene itu (lihat prefetch() di applyCompositeScene()) - jadi switch PERTAMA KALI
-     * ke scene video selalu kena live-decode dulu (real-time, lebih berat di CPU/GPU & baterai),
-     * baru pindah ke cache setelah beberapa detik decode selesai di background.
-     *
-     * Sekarang, begitu savedWidth/Height/Fps sudah pasti (live/record baru mulai), kita langsung
-     * mulai prefetch SEMUA scene composite yang backgroundnya VIDEO, satu per satu (BUKAN paralel
-     * - hardware video decoder di banyak device Android cuma bisa beberapa instance sekaligus,
-     * paralel bisa gagal/rebutan resource). Jadi begitu user beneran pindah ke scene video itu
-     * nanti, cache-nya sudah siap (atau paling tidak sedang jalan lebih dulu) - transisinya jauh
-     * lebih mulus, tidak perlu nunggu decode real-time dari nol tiap kali ganti scene.
-     *
-     * VideoCacheManager sendiri sudah punya budget memori TOTAL (400MB gabungan semua URI) dan
-     * budget per-video (250MB / maks ~20 detik) - jadi aman dipanggil untuk semua scene sekaligus,
-     * kalau kepanjangan/kebanyakan otomatis fallback ke live-streaming utk video yang tidak
-     * kebagian budget, tidak bikin OOM.
-     */
-    private void prewarmAllVideoBackgroundCaches() {
-        new Thread(() -> {
-            try {
-                List<ame.project.nlstudio.scene.Scene> scenes =
-                        new ame.project.nlstudio.scene.SceneRepository(this).loadScenes();
-                List<Uri> videoUris = new ArrayList<>();
-                for (ame.project.nlstudio.scene.Scene scene : scenes) {
-                    if (scene.getBackgroundType() == ame.project.nlstudio.scene.BackgroundType.VIDEO
-                            && scene.getBackgroundUri() != null) {
-                        Uri uri = Uri.parse(scene.getBackgroundUri());
-                        if (!videoUris.contains(uri)) videoUris.add(uri);
-                    }
-                }
-                if (!videoUris.isEmpty()) {
-                    Log.d(TAG, "prewarmAllVideoBackgroundCaches: " + videoUris.size() + " video scene ditemukan, mulai prefetch berurutan");
-                    prewarmNext(videoUris, 0);
-                }
-            } catch (Exception e) {
-                Log.w(TAG, "prewarmAllVideoBackgroundCaches gagal", e);
-            }
-        }, "PrewarmVideoCache").start();
-    }
-
-    private void prewarmNext(List<Uri> uris, int index) {
-        if (index >= uris.size() || !isServiceRunning) return;
-        Uri uri = uris.get(index);
-
-        if (VideoCacheManager.getInstance().isCached(uri)) {
-            prewarmNext(uris, index + 1);
-            return;
-        }
-
-        Log.d(TAG, "prewarmNext: prefetch (" + (index + 1) + "/" + uris.size() + ") " + uri);
-        VideoCacheManager.getInstance().prefetch(this, uri, savedWidth, savedHeight, savedFps,
-                250L * 1024 * 1024, new VideoCacheManager.ProgressListener() {
-                    @Override
-                    public void onProgress(int frames) { }
-
-                    @Override
-                    public void onComplete() {
-                        Log.d(TAG, "prewarmNext: selesai/berhenti utk " + uri + ", lanjut berikutnya");
-                        prewarmNext(uris, index + 1);
-                    }
-                });
-    }
-
     private void switchScene(String scene, Uri uri, String sceneJson) {
         Log.d(TAG, "switchScene: scene=" + scene + " uri=" + uri
                 + " sceneJson=" + sceneJson + " savedWidth/Height="
@@ -870,12 +806,6 @@ public class StreamService extends Service implements ConnectChecker {
         String bgTypeStr = o.optString("backgroundType", "COLOR");
         String bgUriStr = o.isNull("backgroundUri") ? null : o.optString("backgroundUri", null);
 
-        // Prefetch video background jika scene baru ini memilikinya
-        if ("VIDEO".equals(bgTypeStr) && bgUriStr != null) {
-            VideoCacheManager.getInstance().prefetch(this, Uri.parse(bgUriStr),
-                    savedWidth, savedHeight, savedFps, 250L * 1024 * 1024, null);
-        }
-
         // FIX: JANGAN pakai rootWidth/rootHeight dari JSON scene di sini. Itu cuma resolusi device
         // pas scene itu DIBUAT/DISIMPAN, bisa beda dari resolusi yang AKTUAL dipakai encoder di sesi
         // live sekarang (savedWidth/savedHeight, hasil prepareVideo()). Kalau dipaksa pakai rootW/H
@@ -903,6 +833,9 @@ public class StreamService extends Service implements ConnectChecker {
                 bgType = CompositeSceneVideoSource.BackgroundType.VIDEO;
                 if (bgUriStr != null) backgroundVideoUri = Uri.parse(bgUriStr);
                 break;
+            case "SCREEN":
+                bgType = CompositeSceneVideoSource.BackgroundType.SCREEN;
+                break;
             default:
                 bgType = CompositeSceneVideoSource.BackgroundType.COLOR;
         }
@@ -920,7 +853,8 @@ public class StreamService extends Service implements ConnectChecker {
                 java.util.Map<String, Bitmap> vaBitmaps = null;
 
                 if ("VIDEO".equals(layerType)) {
-                    bmp = loadVideoFirstFrame(layerUri);
+                    // Video layers will render live in the compositor, no need for thumbnail bitmap
+                    bmp = null;
                 } else if ("VOICE_ANIM".equals(layerType)) {
                     // Load global voice anim config
                     android.content.SharedPreferences prefs = getSharedPreferences("voice_anim_prefs", Context.MODE_PRIVATE);
@@ -992,26 +926,12 @@ public class StreamService extends Service implements ConnectChecker {
         logGlInterfaceState("setelah changeVideoSource(composite)");
     }
 
-    /** Ambil 1 frame dari video layer buat dipakai sebagai bitmap overlay pas live (bukan motion,
-     *  sama kayak jalur background VIDEO tapi utk layer individual). */
-    private Bitmap loadVideoFirstFrame(Uri uri) {
-        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-        try {
-            retriever.setDataSource(this, uri);
-            return retriever.getFrameAtTime(0);
-        } catch (Exception e) {
-            return null;
-        } finally {
-            try {
-                retriever.release();
-            } catch (Exception ignored) {
-            }
-        }
-    }
 
     private Bitmap loadBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
         try (InputStream is = getContentResolver().openInputStream(uri)) {
-            Bitmap original = BitmapFactory.decodeStream(is);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.RGB_565; // Hemat RAM
+            Bitmap original = BitmapFactory.decodeStream(is, null, options);
             if (original == null) return null;
             return Bitmap.createScaledBitmap(original, reqWidth, reqHeight, true);
         } catch (Exception e) {
@@ -1029,7 +949,9 @@ public class StreamService extends Service implements ConnectChecker {
         }
         int maxDim = Math.max(savedWidth, savedHeight);
         try (InputStream is = getContentResolver().openInputStream(uri)) {
-            Bitmap original = BitmapFactory.decodeStream(is);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inPreferredConfig = Bitmap.Config.RGB_565; // Hemat RAM
+            Bitmap original = BitmapFactory.decodeStream(is, null, options);
             if (original == null) return null;
             float scale = Math.min(1f, (float) maxDim / Math.max(original.getWidth(), original.getHeight()));
             if (scale >= 1f) return original;
@@ -1104,6 +1026,7 @@ public class StreamService extends Service implements ConnectChecker {
             try {
                 applyCompositeScene(initialSceneJson, null);
             } catch (Exception e) {
+                Log.e(TAG, "Gagal apply initial composite scene, falling back to screen", e);
                 applyInitialScreenSource(null);
             }
         } else {

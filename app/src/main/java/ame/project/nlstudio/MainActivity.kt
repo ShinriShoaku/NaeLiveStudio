@@ -41,6 +41,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import ame.project.nlstudio.OBS.VideoCacheManager
+import ame.project.nlstudio.OBS.VideoDiskCacheManager
+import ame.project.nlstudio.OBS.VideoOptimizer
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.firebase.analytics.FirebaseAnalytics
@@ -89,6 +91,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var spinnerEncoderType: Spinner
     private lateinit var etVideoBitrate: EditText
     private lateinit var etAudioBitrate: EditText
+    private lateinit var spinnerVideoBgScale: Spinner
 
     // Audio mixer UI
     private lateinit var spinnerAudioSource: Spinner
@@ -107,7 +110,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sceneAdapter: SceneAdapter
     private lateinit var sceneCanvasView: SceneCanvasView
     private lateinit var etNewSceneName: EditText
-    private lateinit var spinnerRootLayout: Spinner
     // Diisi oleh applyGameCenteredPreset() supaya rootWidth/rootHeight yang dipakai saat SAVE
     // persis sama dengan yang dipakai saat menghitung rasio posisi layer SCREEN (dipaksa Portrait).
     // Tanpa ini, saveCurrentEditingScene() re-read displayMetrics sendiri di waktu yang beda,
@@ -226,16 +228,81 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-    // Pilih video buat BACKGROUND scene yang lagi diedit
+    // Pilih video buat BACKGROUND scene yang lagi diedit.
+    // PENTING: video mentah yang dipilih user TIDAK langsung dipakai apa adanya - selalu
+    // di-crop & dikompres dulu lewat VideoOptimizer (lihat optimizeAndSetBackgroundVideo) supaya
+    // resolusinya pas dengan kanvas dan bitrate-nya kecil. Hasil optimize itulah yang jadi
+    // editingBackgroundUri, bukan file aslinya.
     private val pickBackgroundVideoLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {
                 persistReadPermission(uri)
-                editingBackgroundType = BackgroundType.VIDEO
-                editingBackgroundUri = uri.toString()
-                refreshCanvasBackground()
+                optimizeAndSetBackgroundVideo(uri)
             }
         }
+
+    /**
+     * Crop + kompres video background yang baru dipilih user (via VideoOptimizer) sebelum
+     * dipakai sebagai backgroundUri scene. Kalau video yang sama & resolusi target yang sama
+     * sudah pernah diproses sebelumnya, VideoOptimizer langsung pakai file cache yang ada
+     * (lihat VideoOptimizer.optimize) jadi prosesnya instan di kunjungan berikutnya.
+     */
+    private fun optimizeAndSetBackgroundVideo(sourceUri: Uri) {
+        val (targetW, targetH) = getTargetResolution()
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_loading, null)
+        dialogView.findViewById<TextView>(R.id.tvLoadingText)?.text =
+            "Mengoptimalkan video background..."
+        val progressDialog = AlertDialog.Builder(this)
+            .setTitle("Memproses Video")
+            .setView(dialogView)
+            .setCancelable(false)
+            .show()
+
+        Log.d(TAG, "optimizeAndSetBackgroundVideo: source=$sourceUri target=${targetW}x$targetH")
+
+        val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
+        val bgScale = prefs.getString("video_bg_scale", "Default (Optimize Auto)") ?: "Default (Optimize Auto)"
+
+        VideoOptimizer.optimize(
+            context = this,
+            inputUri = sourceUri,
+            targetW = targetW,
+            targetH = targetH,
+            scaleSetting = bgScale,
+            sceneName = etNewSceneName.text?.toString()?.trim()?.ifEmpty { null },
+            listener = object : VideoOptimizer.Listener {
+                override fun onSuccess(outputUri: Uri) {
+                    runOnUiThread {
+                        if (progressDialog.isShowing) progressDialog.dismiss()
+                        Log.d(TAG, "optimizeAndSetBackgroundVideo: sukses -> $outputUri")
+
+                        // Video lama (kalau ada & berupa hasil cache) sudah tidak dipakai, hapus
+                        // supaya cache tidak menumpuk percuma tiap kali user ganti background.
+                        editingBackgroundUri
+                            ?.takeIf { it.startsWith("file://") }
+                            ?.let { VideoOptimizer.deleteCachedOutputFile(this@MainActivity, it) }
+
+                        editingBackgroundType = BackgroundType.VIDEO
+                        editingBackgroundUri = outputUri.toString()
+                        refreshCanvasBackground()
+                    }
+                }
+
+                override fun onError(e: Exception) {
+                    Log.e(TAG, "optimizeAndSetBackgroundVideo: gagal", e)
+                    runOnUiThread {
+                        if (progressDialog.isShowing) progressDialog.dismiss()
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Gagal memproses video background: ${e.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        )
+    }
 
     // Pilih gambar buat LAYER baru di scene yang lagi diedit
     private val pickLayerImageLauncher =
@@ -267,6 +334,7 @@ class MainActivity : AppCompatActivity() {
         )
         editingLayers.add(newLayer)
         refreshCanvasLayers()
+        applyEditorChangesToLiveStream()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -279,6 +347,9 @@ class MainActivity : AppCompatActivity() {
 
         sceneRepository = SceneRepository(this)
         scenes = sceneRepository.loadScenes()
+
+        // Initialize Video Disk Cache (Media3)
+        VideoDiskCacheManager.getInstance(this)
 
         Log.d(TAG, "=== onCreate ===")
         Log.d(TAG, "DisplayMetrics: ${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}")
@@ -306,6 +377,7 @@ class MainActivity : AppCompatActivity() {
         spinnerEncoderType = dialogSettingsView.findViewById(R.id.spinnerEncoderType)
         etVideoBitrate = dialogSettingsView.findViewById(R.id.etVideoBitrate)
         etAudioBitrate = dialogSettingsView.findViewById(R.id.etAudioBitrate)
+        spinnerVideoBgScale = dialogSettingsView.findViewById(R.id.spinnerVideoBgScale)
         spinnerGameAudioApp = dialogSettingsView.findViewById(R.id.spinnerGameAudioApp)
 
         etVideoBitrate.setText("2500")
@@ -317,29 +389,6 @@ class MainActivity : AppCompatActivity() {
         rvDialog.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
         rvDialog.adapter = sceneAdapter
         etNewSceneName = dialogSceneManagerView.findViewById(R.id.etNewSceneName)
-        spinnerRootLayout = dialogSceneManagerView.findViewById(R.id.spinnerRootLayout)
-
-        val adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            resources.getStringArray(R.array.root_layout_options)
-        )
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        spinnerRootLayout.adapter = adapter
-        // Kalau user MANUAL ganti pilihan resolusi root, batalkan resolusi paksa dari preset
-        // (biar gak nyangkut dan bikin bingung kalau user pindah preset lalu ganti manual).
-        spinnerRootLayout.setOnTouchListener { _, _ -> rootLayoutUserTouched = true; false }
-        spinnerRootLayout.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                if (rootLayoutUserTouched) {
-                    Log.d(TAG, "User MANUALLY changed root layout to position=$position")
-                    editingForcedRootResolution = null
-                    rootLayoutUserTouched = false
-                }
-                refreshCanvasAspectRatio()
-            }
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
 
         tvStatus = findViewById(R.id.tvStatus)
 
@@ -363,6 +412,7 @@ class MainActivity : AppCompatActivity() {
         setupGameAppSpinner()
         setupBottomPager()
         setupActionButtons()
+        loadSettings()
 
         // Restore state if available
         if (savedInstanceState != null) {
@@ -373,9 +423,6 @@ class MainActivity : AppCompatActivity() {
         // Load initial scene to canvas
         val initialScene = scenes.find { it.id == activeSceneId } ?: scenes.firstOrNull()
         initialScene?.let { switchToScene(it, updateService = savedInstanceState == null) }
-
-        // Prefetch SEMUA video background di background agar siap saat dibutuhkan
-        prefetchAllVideoScenes()
 
         // Force UI update for initial scene even if panel not bound yet
         refreshCanvasBackground()
@@ -429,6 +476,26 @@ class MainActivity : AppCompatActivity() {
         AudioLevelBus.unregisterListener(audioLevelListener)
     }
 
+    private fun loadSettings() {
+        val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
+        val bgScale = prefs.getString("video_bg_scale", "Default (Optimize Auto)") ?: "Default (Optimize Auto)"
+        
+        // Find index of bgScale in spinner
+        val adapter = spinnerVideoBgScale.adapter
+        for (i in 0 until adapter.count) {
+            if (adapter.getItem(i).toString() == bgScale) {
+                spinnerVideoBgScale.setSelection(i)
+                break
+            }
+        }
+    }
+
+    private fun saveSettings() {
+        val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
+        val bgScale = spinnerVideoBgScale.selectedItem?.toString() ?: "Default (Optimize Auto)"
+        prefs.edit().putString("video_bg_scale", bgScale).apply()
+    }
+
     private fun showSettingsDialog() {
         // Ensure the view is removed from its parent if it was already shown
         (dialogSettingsView.parent as? android.view.ViewGroup)?.removeView(dialogSettingsView)
@@ -438,7 +505,11 @@ class MainActivity : AppCompatActivity() {
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Settings Connection & Quality")
             .setView(dialogSettingsView)
-            .setPositiveButton("OK", null)
+            .setPositiveButton("OK") { _, _ ->
+                saveSettings()
+                refreshCanvasAspectRatio()
+                refreshCanvasLayers()
+            }
             .show()
     }
 
@@ -593,8 +664,30 @@ class MainActivity : AppCompatActivity() {
             val idx = editingLayers.indexOfFirst { it.id == layer.id }
             if (idx >= 0) {
                 editingLayers[idx] = layer
+                applyEditorChangesToLiveStream()
             }
         }
+    }
+
+    /** Menerapkan perubahan yang sedang dibuat di editor ke live stream secara real-time
+     *  jika scene yang sedang diedit adalah scene yang sedang aktif tampil. */
+    private fun applyEditorChangesToLiveStream() {
+        if (!StreamService.isServiceRunning) return
+
+        // Hanya update jika kita sedang mengedit scene yang saat ini ditampilkan live
+        if (editingSceneId != activeSceneId) return
+
+        val (targetW, targetH) = getTargetResolution()
+        val tempScene = Scene(
+            id = editingSceneId ?: "temp",
+            name = etNewSceneName.text.toString(),
+            backgroundType = editingBackgroundType,
+            backgroundUri = editingBackgroundUri,
+            layers = editingLayers,
+            rootWidth = targetW,
+            rootHeight = targetH
+        )
+        sendSceneSwitch(StreamService.SCENE_COMPOSITE, sceneRepository.toJson(tempScene))
     }
 
     /** Pilih layer ini di mana pun asalnya (tap di kanvas ATAU tap di layer strip) - keduanya disinkronkan. */
@@ -608,13 +701,14 @@ class MainActivity : AppCompatActivity() {
         editingLayers.removeAll { it.id == layerId }
         if (selectedLayerId == layerId) selectedLayerId = null
         refreshCanvasLayers()
+        applyEditorChangesToLiveStream()
     }
 
     private fun showAddVoiceAnimOptions() {
         // Just add a Voice Animation layer using the current default config
         val prefs = getSharedPreferences("voice_anim_prefs", Context.MODE_PRIVATE)
         val configJson = prefs.getString("default_config", "") ?: ""
-        
+
         val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
         val newLayer = SceneLayer(
             id = UUID.randomUUID().toString(),
@@ -636,7 +730,17 @@ class MainActivity : AppCompatActivity() {
                 when (which) {
                     0 -> pickLayerImageLauncher.launch(arrayOf("image/*"))
                     1 -> pickLayerVideoLauncher.launch(arrayOf("video/*"))
-                    2 -> addLayer(LayerType.SCREEN, "screen://main", w = 0.5f, h = 0.3f)
+                    2 -> {
+                        val metrics = resources.displayMetrics
+                        val screenRatio = metrics.widthPixels.toFloat() / metrics.heightPixels
+                        val (canvasW, canvasH) = getTargetResolution()
+                        val canvasRatio = canvasW.toFloat() / canvasH
+
+                        // Default lebar 0.4, tinggi menyesuaikan rasio layar HP agar tidak gepeng
+                        val w = 0.4f
+                        val h = w * (canvasRatio / screenRatio)
+                        addLayer(LayerType.SCREEN, "screen://main", w = w, h = h)
+                    }
                 }
             }
             .show()
@@ -807,22 +911,20 @@ class MainActivity : AppCompatActivity() {
         val safeExistingId = if (editingSceneId == SceneRepository.ID_SCREEN) null else editingSceneId
 
         val metrics = resources.displayMetrics
-        // PENTING: kalau preset "Game di Tengah" baru dipakai, pakai PERSIS resolusi yang sama
-        // dengan yang dipakai buat menghitung rasio posisi layer SCREEN-nya (editingForcedRootResolution).
-        // Jangan re-read displayMetrics lagi di sini, karena bisa saja nilainya udah beda
-        // (misal sempat landscape sesaat) dari waktu preset dihitung -> canvas & posisi layer jadi mismatch.
-        val (rootW, rootH) = editingForcedRootResolution ?: when (spinnerRootLayout.selectedItemPosition) {
-            0 -> metrics.widthPixels to metrics.heightPixels
-            1 -> 1080 to 1920
-            2 -> 1920 to 1080
-            3 -> 1080 to 1920 // Preset Game di Tengah (Legacy 1080p)
-            else -> metrics.widthPixels to metrics.heightPixels
+        // Resolusi root otomatis diambil dari Setting Quality, menyesuaikan orientasi scene yang sedang diedit
+        val (targetW, targetH) = getTargetResolution()
+        val forced = editingForcedRootResolution
+        val (rootW, rootH) = if (forced != null) {
+            val forcedIsPortrait = forced.second > forced.first
+            val targetIsPortrait = targetH > targetW
+            if (forcedIsPortrait == targetIsPortrait) targetW to targetH else targetH to targetW
+        } else {
+            targetW to targetH
         }
 
         Log.d(TAG, "=== saveCurrentEditingScene ===")
         Log.d(TAG, "  Name=$name, existingId=$safeExistingId")
         Log.d(TAG, "  editingForcedRootResolution=$editingForcedRootResolution")
-        Log.d(TAG, "  spinnerPosition=${spinnerRootLayout.selectedItemPosition}")
         Log.d(TAG, "  displayMetrics=${metrics.widthPixels}x${metrics.heightPixels}")
         Log.d(TAG, "  FINAL rootW=$rootW, rootH=$rootH")
         Log.d(TAG, "  editingBackgroundType=$editingBackgroundType")
@@ -870,7 +972,6 @@ class MainActivity : AppCompatActivity() {
         editingLayers = mutableListOf()
         etNewSceneName.setText("")
         editingForcedRootResolution = null
-        spinnerRootLayout.setSelection(0)
         selectLayer(null)
         refreshCanvasAspectRatio()
         refreshCanvasBackground()
@@ -895,15 +996,6 @@ class MainActivity : AppCompatActivity() {
         etNewSceneName.setText(scene.name)
         editingForcedRootResolution = scene.rootWidth to scene.rootHeight
 
-        val metrics = resources.displayMetrics
-        val resIdx = when {
-            scene.rootWidth == metrics.widthPixels && scene.rootHeight == metrics.heightPixels -> 0
-            scene.rootWidth == 1080 && scene.rootHeight == 1920 -> 1
-            scene.rootWidth == 1920 && scene.rootHeight == 1080 -> 2
-            else -> 0
-        }
-        spinnerRootLayout.setSelection(resIdx)
-
         selectLayer(null)
         refreshCanvasAspectRatio()
         refreshCanvasBackground()
@@ -911,14 +1003,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyPortraitPreset(position: String) { // "center", "top", "bottom"
-        val metrics = resources.displayMetrics
-        val rootW = minOf(metrics.widthPixels, metrics.heightPixels)
-        val rootH = maxOf(metrics.widthPixels, metrics.heightPixels)
+        val (targetW, targetH) = getTargetResolution()
+        val rootW = minOf(targetW, targetH)
+        val rootH = maxOf(targetW, targetH)
 
         Log.d(TAG, "=== applyPortraitPreset position=$position ===")
         editingForcedRootResolution = rootW to rootH
         rootLayoutUserTouched = false
-        spinnerRootLayout.setSelection(0)
 
         if (editingBackgroundType == BackgroundType.SCREEN) {
             editingBackgroundType = BackgroundType.COLOR
@@ -927,6 +1018,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         editingLayers.clear()
+        // Gunakan rasio 16:9 untuk area game (umum di portrait)
         val gameHeight = rootW * 9f / 16f
         val hRatio = gameHeight / rootH
 
@@ -954,24 +1046,19 @@ class MainActivity : AppCompatActivity() {
             else -> "Game Tengah"
         }
         etNewSceneName.setText("Preset $label")
-        dialogSceneManagerView.findViewById<Button>(R.id.btnApplyRootPreset)?.text = "Terapkan: $label"
 
         refreshCanvasAspectRatio()
         refreshCanvasLayers()
-
-        // Simpan otomatis ke daftar scene dan terapkan ke main activity
-        saveCurrentEditingScene()
     }
 
     private fun applyLandscapeFullPreset() {
-        val metrics = resources.displayMetrics
-        val rootW = maxOf(metrics.widthPixels, metrics.heightPixels)
-        val rootH = minOf(metrics.widthPixels, metrics.heightPixels)
+        val (targetW, targetH) = getTargetResolution()
+        val rootW = maxOf(targetW, targetH)
+        val rootH = minOf(targetW, targetH)
 
         Log.d(TAG, "=== applyLandscapeFullPreset ===")
         editingForcedRootResolution = rootW to rootH
         rootLayoutUserTouched = false
-        spinnerRootLayout.setSelection(2) // 1920x1080 (Landscape)
 
         if (editingBackgroundType == BackgroundType.SCREEN) {
             editingBackgroundType = BackgroundType.COLOR
@@ -993,13 +1080,9 @@ class MainActivity : AppCompatActivity() {
         editingLayers.add(gameLayer)
 
         etNewSceneName.setText("Preset Landscape Full")
-        dialogSceneManagerView.findViewById<Button>(R.id.btnApplyRootPreset)?.text = "Terapkan: Landscape Full"
 
         refreshCanvasAspectRatio()
         refreshCanvasLayers()
-
-        // Simpan otomatis ke daftar scene dan terapkan ke main activity
-        saveCurrentEditingScene()
     }
 
     private fun applyGameCenteredPreset() {
@@ -1015,6 +1098,7 @@ class MainActivity : AppCompatActivity() {
             isEmptyHint?.text = "PREVIEW LAYAR HP AKTIF\n(Akan muncul saat Live/Record)"
             isEmptyHint?.visibility = View.VISIBLE
             sceneCanvasView.setBackgroundBitmap(null)
+            applyEditorChangesToLiveStream()
             return
         }
 
@@ -1034,6 +1118,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 btnPlayVideo?.setImageResource(android.R.drawable.ic_media_play)
             }
+            applyEditorChangesToLiveStream()
             return
         }
 
@@ -1050,6 +1135,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         sceneCanvasView.setBackgroundBitmap(bmp)
+        applyEditorChangesToLiveStream()
     }
 
     private fun refreshCanvasLayers() {
@@ -1069,13 +1155,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshCanvasAspectRatio() {
-        val metrics = resources.displayMetrics
-        val (rootW, rootH) = editingForcedRootResolution ?: when (spinnerRootLayout.selectedItemPosition) {
-            0 -> metrics.widthPixels to metrics.heightPixels
-            1 -> 1080 to 1920
-            2 -> 1920 to 1080
-            3 -> 1080 to 1920 // Preset Game di Tengah (Legacy 1080p)
-            else -> metrics.widthPixels to metrics.heightPixels
+        val (targetW, targetH) = getTargetResolution()
+        val forced = editingForcedRootResolution
+        val (rootW, rootH) = if (forced != null) {
+            val forcedIsPortrait = forced.second > forced.first
+            val targetIsPortrait = targetH > targetW
+            if (forcedIsPortrait == targetIsPortrait) targetW to targetH else targetH to targetW
+        } else {
+            targetW to targetH
         }
         val ratio = rootW.toFloat() / rootH
         Log.d(TAG, "refreshCanvasAspectRatio: root=${rootW}x${rootH} ratio=$ratio")
@@ -1089,6 +1176,11 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Hapus") { _, _ ->
                 scenes.removeAll { it.id == scene.id }
                 sceneRepository.deleteThumbnail(scene)
+                // Kalau backgroundnya video hasil optimize (file cache lokal), hapus juga filenya
+                // dari cache biar tidak numpuk percuma.
+                scene.backgroundUri
+                    ?.takeIf { scene.backgroundType == BackgroundType.VIDEO && it.startsWith("file://") }
+                    ?.let { VideoOptimizer.deleteCachedOutputFile(this, it) }
                 sceneRepository.saveScenes(scenes)
                 if (activeSceneId == scene.id) {
                     // scene yg lagi aktif dihapus -> balik ke Layar HP biar gak nunjuk ke scene kosong
@@ -1148,9 +1240,9 @@ class MainActivity : AppCompatActivity() {
         if (!updateService) return
 
         if (scene.backgroundType == BackgroundType.SCREEN) {
-            sendSceneSwitch(StreamService.SCENE_SCREEN, sceneJson = null)
+            sendSceneSwitch(StreamService.SCENE_SCREEN, sceneJson = null, scene = scene)
         } else {
-            sendSceneSwitch(StreamService.SCENE_COMPOSITE, sceneJson = sceneRepository.toJson(scene))
+            sendSceneSwitch(StreamService.SCENE_COMPOSITE, sceneJson = sceneRepository.toJson(scene), scene = scene)
         }
     }
 
@@ -1233,16 +1325,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Kirim perintah ganti scene ke StreamService yang lagi jalan (aman dipanggil walau service belum start). */
-    private fun sendSceneSwitch(scene: String, sceneJson: String?) {
+    private fun sendSceneSwitch(sceneType: String, sceneJson: String?, scene: Scene? = null) {
         val intent = Intent(this, StreamService::class.java).apply {
             action = StreamService.ACTION_SWITCH_SCENE
-            putExtra(StreamService.EXTRA_SCENE_TYPE, scene)
+            putExtra(StreamService.EXTRA_SCENE_TYPE, sceneType)
             if (sceneJson != null) putExtra(StreamService.EXTRA_SCENE_JSON, sceneJson)
+            grantScenePermissions(this, scene)
         }
         try {
             startService(intent)
         } catch (e: Exception) {
             // service belum jalan (belum live) -> scene akan dipakai begitu live dimulai, gapapa
+        }
+    }
+
+    private fun grantScenePermissions(intent: Intent, scene: Scene?) {
+        if (scene == null) return
+        val uris = mutableSetOf<Uri>()
+        if (scene.backgroundType == BackgroundType.VIDEO || scene.backgroundType == BackgroundType.IMAGE) {
+            scene.backgroundUri?.let { if (it.startsWith("content://")) uris.add(Uri.parse(it)) }
+        }
+        scene.layers.forEach { layer ->
+            if (layer.uri.startsWith("content://")) {
+                uris.add(Uri.parse(layer.uri))
+            }
+        }
+
+        if (uris.isNotEmpty()) {
+            val firstUri = uris.first()
+            val clipData = android.content.ClipData.newRawUri("Scene URIs", firstUri)
+            uris.drop(1).forEach { uri ->
+                clipData.addItem(android.content.ClipData.Item(uri))
+            }
+            intent.clipData = clipData
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
 
@@ -1308,10 +1424,6 @@ class MainActivity : AppCompatActivity() {
             deleteLayer(id)
             it.isEnabled = false
             it.alpha = 0.4f
-        }
-
-        dialogSceneManagerView.findViewById<Button>(R.id.btnApplyRootPreset)?.setOnClickListener {
-            applyGameCenteredPreset()
         }
 
         // New Presets Click Listeners
@@ -1440,7 +1552,7 @@ class MainActivity : AppCompatActivity() {
             this, uri, scene.rootWidth, scene.rootHeight, 30, 250L * 1024 * 1024,
             object : VideoCacheManager.ProgressListener {
                 override fun onProgress(frames: Int) {}
-                override fun onComplete() {
+                override fun onComplete(fullyCached: Boolean) {
                     // onComplete bisa dipanggil dari thread decoder internal, bukan main thread -
                     // lompat balik ke main thread cuma untuk lanjut ke item berikutnya (murah/aman).
                     Handler(Looper.getMainLooper()).post {
@@ -1506,7 +1618,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
 
-                    override fun onComplete() {
+                    override fun onComplete(fullyCached: Boolean) {
                         currentIdx++
                         cacheNext()
                     }
@@ -1520,51 +1632,57 @@ class MainActivity : AppCompatActivity() {
         screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
     }
 
-    private fun collectStreamParams(): StreamParams {
-        val selectedRes = spinnerResolution.selectedItem.toString()
-        var width: Int
-        var height: Int
-
-        Log.d(TAG, "=== collectStreamParams ===")
-        Log.d(TAG, "  selectedRes=$selectedRes")
-        Log.d(TAG, "  activeSceneId=$activeSceneId")
+    private fun getTargetResolution(): Pair<Int, Int> {
+        val metrics = resources.displayMetrics
+        val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
 
         if (selectedRes.contains("Native")) {
-            val metrics = resources.displayMetrics
-            width = metrics.widthPixels
-            height = metrics.heightPixels
-
-            Log.d(TAG, "  Native mode: metrics=${width}x${height}")
-            Log.d(TAG, "  orientation=${resources.configuration.orientation}")
-
-            // FIX: Sinkronisasi Orientasi. Jika scene aktif adalah Portrait (tinggi > lebar),
-            // pastikan encoder juga Portrait meskipun HP sedang dipegang Landscape (miring).
-            // Tanpa ini, live akan jadi 'windowboxed' (kecil di tengah) karena mismatch aspek rasio.
-            val activeScene = scenes.find { it.id == activeSceneId }
-            if (activeScene != null) {
-                val sceneIsPortrait = activeScene.rootHeight > activeScene.rootWidth
-                val encoderIsPortrait = height > width
-                Log.d(TAG, "  Scene root=${activeScene.rootWidth}x${activeScene.rootHeight}")
-                Log.d(TAG, "  sceneIsPortrait=$sceneIsPortrait, encoderIsPortrait=$encoderIsPortrait")
-                if (sceneIsPortrait != encoderIsPortrait) {
-                    Log.w(TAG, "  MISMATCH! Swapping encoder dimensions to match scene orientation")
-                    val temp = width
-                    width = height
-                    height = temp
-                    Log.d(TAG, "  After swap: ${width}x${height}")
-                }
-            }
-
-            // PENTING: Lebar dan Tinggi harus angka genap (divisible by 2) agar tidak crash di encoder
-            if (width % 2 != 0) width--
-            if (height % 2 != 0) height--
+            return metrics.widthPixels to metrics.heightPixels
         } else {
             val resString = selectedRes.split(" ")[0]
             val parts = resString.split("x")
-            width = parts.getOrNull(0)?.toIntOrNull() ?: 720
-            height = parts.getOrNull(1)?.toIntOrNull() ?: 1280
-            Log.d(TAG, "  Fixed resolution: ${width}x${height}")
+            var w = parts.getOrNull(0)?.toIntOrNull() ?: 720
+            var h = parts.getOrNull(1)?.toIntOrNull() ?: 1280
+
+            // Match screen orientation (if screen is portrait, make res portrait)
+            val screenIsPortrait = metrics.heightPixels > metrics.widthPixels
+            val resIsPortrait = h > w
+            if (screenIsPortrait != resIsPortrait) {
+                val temp = w
+                w = h
+                h = temp
+            }
+            return w to h
         }
+    }
+
+    private fun collectStreamParams(): StreamParams {
+        val (targetW, targetH) = getTargetResolution()
+        var width = targetW
+        var height = targetH
+
+        Log.d(TAG, "=== collectStreamParams ===")
+        Log.d(TAG, "  targetRes from settings=${width}x${height}")
+        Log.d(TAG, "  activeSceneId=$activeSceneId")
+
+        // FIX: Sinkronisasi Orientasi. Jika scene aktif adalah Portrait (tinggi > lebar),
+        // pastikan encoder juga Portrait meskipun HP sedang dipegang Landscape (miring).
+        val activeScene = scenes.find { it.id == activeSceneId }
+        if (activeScene != null) {
+            val sceneIsPortrait = activeScene.rootHeight > activeScene.rootWidth
+            val encoderIsPortrait = height > width
+            Log.d(TAG, "  Scene root=${activeScene.rootWidth}x${activeScene.rootHeight}")
+            if (sceneIsPortrait != encoderIsPortrait) {
+                Log.w(TAG, "  Swapping dimensions to match scene orientation")
+                val temp = width
+                width = height
+                height = temp
+            }
+        }
+
+        // PENTING: Lebar dan Tinggi harus angka genap
+        if (width % 2 != 0) width--
+        if (height % 2 != 0) height--
 
         val fpsString = spinnerFps.selectedItem.toString().split(" ")[0]
         val fps = fpsString.toIntOrNull() ?: 30
@@ -1631,6 +1749,7 @@ class MainActivity : AppCompatActivity() {
                     Log.d(TAG, "  Sending SCENE_COMPOSITE with JSON length=${sceneJson.length}")
                 }
             }
+            grantScenePermissions(this, activeScene)
         }
 
         val params = Bundle().apply {
@@ -1641,9 +1760,22 @@ class MainActivity : AppCompatActivity() {
         }
         firebaseAnalytics.logEvent("stream_started", params)
 
+        // FIX "video tidak bergerak" saat live/test record: startForegroundService() TIDAK
+        // menjamin StreamService.onCreate() (yang set isServiceRunning=true) sudah jalan begitu
+        // baris berikutnya dieksekusi - keduanya sama2 di main thread, jadi onCreate() service
+        // baru bisa jalan SETELAH method ini selesai return ke looper. Kalau refreshCanvasBackground()
+        // dipanggil SETELAH startForegroundService() (urutan lama), isServiceRunning masih kebaca
+        // false sesaat, autoPlay preview video di editor jadi tetap true, dan preview itu terus
+        // decode video BERBARENGAN dengan decoder video yang dipakai live/test-record -> di HW
+        // decoder yang cuma sanggup 1-2 instance bersamaan (lihat komentar prefetchAllVideoScenes),
+        // salah satu decoder jadi freeze/stuck. Fix: set flag & hentikan preview video editor DULU,
+        // baru start service-nya.
+        StreamService.isServiceRunning = true
+        sceneCanvasView.pauseVideo()
+        refreshCanvasBackground()
+
         ContextCompat.startForegroundService(this, intent)
         tvStatus.text = "Status: live streaming..."
-        refreshCanvasBackground()
     }
 
     private fun startTestRecordService(resultCode: Int, data: Intent) {
@@ -1674,10 +1806,18 @@ class MainActivity : AppCompatActivity() {
                     putExtra(StreamService.EXTRA_SCENE_JSON, sceneRepository.toJson(activeScene))
                 }
             }
+            grantScenePermissions(this, activeScene)
         }
+
+        // Sama seperti startStreamService(): hentikan preview video editor & set flag SEBELUM
+        // startForegroundService(), supaya tidak ada 2 video decoder hardware jalan bersamaan
+        // (preview editor + decoder punya CompositeSceneVideoSource utk test record) pas start.
+        StreamService.isServiceRunning = true
+        sceneCanvasView.pauseVideo()
+        refreshCanvasBackground()
+
         ContextCompat.startForegroundService(this, intent)
         tvStatus.text = "Status: test recording..."
-        refreshCanvasBackground()
     }
 
     private data class StreamParams(

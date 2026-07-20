@@ -27,9 +27,10 @@
 
     <string-array name="resolution_options">
         <item>Sesuai Layar (Native)</item>
-        <item>1280x720 (High)</item>
-        <item>640x480 (Standard)</item>
-        <item>320x240 (Fastest)</item>
+        <item>1920x1080 (1080p)</item>
+        <item>1280x720 (720p)</item>
+        <item>746x420 (420p)</item>
+        <item>568x320 (320p)</item>
     </string-array>
 
     <string-array name="fps_options">
@@ -53,10 +54,12 @@
         <item>🎬 Video File</item>
     </string-array>
 
-    <string-array name="root_layout_options">
-        <item>Sesuai Layar (Native)</item>
-        <item>Portrait 1080x1920 (Full)</item>
-        <item>Landscape 1920x1080 (Full)</item>
-        <item>Preset: Game di Tengah (Portrait)</item>
+    <string-array name="video_bg_scale_options">
+        <item>Default (Optimize Auto)</item>
+        <item>1080p</item>
+        <item>720p</item>
+        <item>420p</item>
+        <item>320p</item>
     </string-array>
+
 </resources>

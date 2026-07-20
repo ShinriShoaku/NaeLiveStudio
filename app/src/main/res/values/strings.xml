@@ -19,4 +19,5 @@
     <string name="record">🎬 RECORD</string>
     <string name="stop">⏹ STOP</string>
     <string name="live">🔴 LIVE</string>
+    <string name="label_video_bg_scale">Video Background Scale:</string>
 </resources>

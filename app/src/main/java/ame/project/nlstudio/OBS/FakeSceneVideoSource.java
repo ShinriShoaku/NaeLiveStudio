@@ -2,12 +2,16 @@ package ame.project.nlstudio.OBS;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.Rect;
 import android.graphics.SurfaceTexture;
 import android.net.Uri;
+import android.opengl.EGL14;
+import android.opengl.EGLConfig;
+import android.opengl.EGLContext;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLSurface;
+import android.opengl.GLES11Ext;
+import android.opengl.GLES20;
+import android.opengl.GLUtils;
 import android.util.Log;
 import android.view.Surface;
 
@@ -15,21 +19,18 @@ import androidx.annotation.NonNull;
 
 import com.pedro.encoder.input.sources.video.VideoSource;
 
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.FloatBuffer;
 
+/**
+ * GPU Optimized Fake Scene Video Source.
+ */
 public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeSupport {
 
-    private static final String TAG = "FakeSceneVideoSource";
-
-    // Budget memori cache. ~250MB cukup buat klip pendek-menengah; disesuaikan lagi kalau perlu.
-    private static final long CACHE_MEMORY_BUDGET_BYTES = 250L * 1024 * 1024;
-    // Batas durasi cache dalam DETIK (dihitung terhadap fps asli dari encoder). Video lebih
-    // panjang dari ini otomatis fallback ke live-streaming, bukan dipotong/di-cache sebagian.
-    private static final int CACHE_MAX_DURATION_SECONDS = 20;
+    private static final String TAG = "FakeScene-GPU";
 
     public enum Mode { STATIC_IMAGE, VIDEO_FILE }
-
-    private enum VideoPlaybackState { LOADING_CACHE, CACHED, LIVE_STREAM }
 
     private final Context context;
     private final Mode mode;
@@ -39,46 +40,21 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
     private Surface targetSurface;
     private Thread drawThread;
     private volatile boolean running = false;
-    // FPS asli dari encoder (lewat create()), dipakai buat pacing loop gambar.
     private volatile int targetFps = 30;
 
-    // ---- Crossfade transisi scene ----
-    // Durasi fade saat scene ini BARU MULAI (dari snapshot scene sebelumnya -> konten scene ini).
-    private static final long FADE_DURATION_NS = 350_000_000L; // 350ms
-    // Bitmap terakhir dari scene SEBELUMNYA, di-set oleh StreamService.switchScene() SEBELUM
-    // start() dipanggil, supaya draw-loop bisa cross-dissolve dari frame lama ke frame baru
-    // alih-alih langsung "cut" (yang kerasa patah/berat karena teardown+setup source lama&baru).
-    private volatile Bitmap fadeFromSnapshot;
-    private long fadeStartNs = -1L;
+    private VideoTextureDecoder videoDecoder;
 
-    // Buffer offscreen tempat kita compose 1 frame lengkap SEBELUM di-blit ke Surface encoder.
-    // Ini titik yang juga dipakai untuk mengambil "snapshot frame terakhir" saat scene ini
-    // akan diganti ke scene lain (lihat peekCurrentFrame()).
-    private Bitmap frameBuffer;
-    private final Object frameBufferLock = new Object();
+    // GL Resources
+    private EGLDisplay eglDisplay = EGL14.EGL_NO_DISPLAY;
+    private EGLContext eglContext = EGL14.EGL_NO_CONTEXT;
+    private EGLSurface eglSurface = EGL14.EGL_NO_SURFACE;
 
-    /** Dipanggil StreamService SEBELUM start(), untuk mewariskan frame terakhir scene sebelumnya
-     *  supaya scene ini bisa fade-in dari situ. Aman dipanggil dengan null (tidak ada fade). */
-    public void setFadeFromSnapshot(Bitmap snapshot) {
-        this.fadeFromSnapshot = snapshot;
-    }
-
-    /** Ambil salinan frame yang lagi ditampilkan sekarang (dipakai StreamService sebagai bahan
-     *  fade-out sebelum scene ini di-stop() & diganti scene lain). Bisa null kalau belum ada frame. */
-    public Bitmap peekCurrentFrame() {
-        synchronized (frameBufferLock) {
-            if (frameBuffer == null || frameBuffer.isRecycled()) return null;
-            return frameBuffer.copy(frameBuffer.getConfig(), false);
-        }
-    }
-
-    // ---- State khusus mode VIDEO_FILE ----
-    private volatile VideoPlaybackState videoPlaybackState = VideoPlaybackState.LOADING_CACHE;
-    private final CopyOnWriteArrayList<Bitmap> cachedFrames = new CopyOnWriteArrayList<>();
-    private VideoTextureDecoder prefetchDecoder; // decode sekali jalan buat isi cache (loop=false)
-    private VideoTextureDecoder liveDecoder;     // fallback real-time (loop=true), dipakai kalau cache dibatalkan
-    private volatile Bitmap latestLiveFrame;
-    private final Object liveFrameLock = new Object();
+    private int oesProgram, rgbaProgram;
+    private int imageTextureId = 0;
+    private int videoTextureId = 0;
+    private FloatBuffer vertexBuffer, texCoordBuffer;
+    private final float[] identityMatrix = new float[16];
+    { android.opengl.Matrix.setIdentityM(identityMatrix, 0); }
 
     public FakeSceneVideoSource(Context context, Bitmap staticImage) {
         super();
@@ -103,297 +79,199 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
 
     @Override
     protected boolean create(int width, int height, int fps, int rotation) {
-        setWidth(width);
-        setHeight(height);
         this.targetFps = fps > 0 ? fps : 30;
         return true;
     }
 
     @Override
     public void start(@NonNull SurfaceTexture surfaceTexture) {
-        int w = getWidth();
-        int h = getHeight();
-        if (w <= 0) w = 720;
-        if (h <= 0) h = 1280;
-
-        surfaceTexture.setDefaultBufferSize(w, h);
-
+        surfaceTexture.setDefaultBufferSize(getWidth(), getHeight());
         this.targetSurface = new Surface(surfaceTexture);
         running = true;
 
-        if (mode == Mode.VIDEO_FILE) {
-            startVideoPlayback(w, h);
+        if (mode == Mode.VIDEO_FILE && videoUri != null) {
+            videoDecoder = VideoCacheManager.getInstance().acquire(context, videoUri, getWidth(), getHeight(), targetFps);
+            videoDecoder.setPlayWhenReady(true);
         }
-        startDrawLoop();
+
+        drawThread = new Thread(this::runDrawLoop, "FakeScene-GPU-Thread");
+        drawThread.start();
     }
 
     @Override
     public void stop() {
         running = false;
-        // Cegah callback prefetch yang masih nyangkut nulis ke cache setelah stop() dipanggil.
-        videoPlaybackState = VideoPlaybackState.LIVE_STREAM;
-
         if (drawThread != null) {
-            try {
-                drawThread.join(300);
-            } catch (InterruptedException ignored) {}
-            drawThread = null;
+            // Bangunkan thread dari Thread.sleep() di runDrawLoop supaya keluar SEGERA,
+            // daripada nunggu pasif sampai frame interval berikutnya atau timeout join.
+            drawThread.interrupt();
+            try { drawThread.join(300); } catch (InterruptedException ignored) {}
         }
-        if (prefetchDecoder != null) {
-            prefetchDecoder.stop();
-            prefetchDecoder = null;
+        if (videoUri != null) {
+            VideoCacheManager.getInstance().release(videoUri);
         }
-        if (liveDecoder != null) {
-            liveDecoder.stop();
-            liveDecoder = null;
+        videoDecoder = null;
+        if (staticImage != null && !staticImage.isRecycled()) {
+            staticImage.recycle();
         }
-        recycleCachedFrames();
-        latestLiveFrame = null;
-
-        synchronized (frameBufferLock) {
-            if (frameBuffer != null && !frameBuffer.isRecycled()) frameBuffer.recycle();
-            frameBuffer = null;
-        }
-        if (fadeFromSnapshot != null && !fadeFromSnapshot.isRecycled()) {
-            fadeFromSnapshot.recycle();
-        }
-        fadeFromSnapshot = null;
-
         if (targetSurface != null) {
             targetSurface.release();
             targetSurface = null;
         }
     }
 
-    @Override
-    public void release() {
-        stop();
-    }
+    @Override public void release() { stop(); }
+    @Override public boolean isRunning() { return running; }
 
-    @Override
-    public boolean isRunning() {
-        return running;
-    }
+    private void runDrawLoop() {
+        initGl();
+        long frameIntervalNs = 1_000_000_000L / targetFps;
+        long nextFrameTimeNs = System.nanoTime();
 
-    private void recycleCachedFrames() {
-        for (Bitmap b : cachedFrames) {
-            if (b != null && !b.isRecycled()) {
-                b.recycle();
+        while (running) {
+            long now = System.nanoTime();
+            if (now < nextFrameTimeNs) {
+                try { Thread.sleep((nextFrameTimeNs - now) / 1_000_000L); } catch (InterruptedException e) { break; }
             }
+
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+
+            if (mode == Mode.VIDEO_FILE && videoDecoder != null) {
+                if (videoTextureId == 0) {
+                    int[] tex = new int[1];
+                    GLES20.glGenTextures(1, tex, 0);
+                    videoTextureId = tex[0];
+                    GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, videoTextureId);
+                    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                    GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                    videoDecoder.attachToGLContext(videoTextureId);
+                }
+                videoDecoder.updateTexImage();
+                drawTexture(oesProgram, videoTextureId, videoDecoder.getTexMatrix(), true);
+            } else if (mode == Mode.STATIC_IMAGE && staticImage != null) {
+                if (imageTextureId == 0) {
+                    int[] tex = new int[1];
+                    GLES20.glGenTextures(1, tex, 0);
+                    imageTextureId = tex[0];
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, imageTextureId);
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, staticImage, 0);
+                }
+                drawTexture(rgbaProgram, imageTextureId, identityMatrix, false);
+            }
+
+            EGL14.eglSwapBuffers(eglDisplay, eglSurface);
+            nextFrameTimeNs += frameIntervalNs;
+            if (System.nanoTime() - nextFrameTimeNs > frameIntervalNs) nextFrameTimeNs = System.nanoTime();
         }
-        cachedFrames.clear();
+        releaseGl();
     }
 
-    /** Mulai proses cache (decode sekali, non-loop). Kalau nabrak budget, otomatis fallback live. */
-    private void startVideoPlayback(final int w, final int h) {
-        videoPlaybackState = VideoPlaybackState.LOADING_CACHE;
-
-        final int frameBytes = w * h * 2; // RGB_565 = 2 byte/pixel
-        final int maxCacheFrames = Math.max(30, targetFps * CACHE_MAX_DURATION_SECONDS);
-
-        prefetchDecoder = new VideoTextureDecoder(context, videoUri, w, h, false, new VideoTextureDecoder.Listener() {
-            @Override
-            public void onFrame(Bitmap bitmap) {
-                if (videoPlaybackState != VideoPlaybackState.LOADING_CACHE) {
-                    return; // sudah selesai/dibatalkan sebelumnya, abaikan frame nyasar
-                }
-
-                long projectedBytes = (long) (cachedFrames.size() + 1) * frameBytes;
-                if (cachedFrames.size() >= maxCacheFrames || projectedBytes > CACHE_MEMORY_BUDGET_BYTES) {
-                    Log.d(TAG, "Cache budget kelewat (frame=" + cachedFrames.size()
-                            + ", bytes=" + projectedBytes + ") -> fallback ke live-streaming");
-                    abandonCacheAndFallbackToLive(w, h);
-                    return;
-                }
-
-                // Copy WAJIB: bitmap dari callback ini double-buffer milik decoder, isinya akan
-                // ditimpa lagi di frame berikutnya. Sekalian convert ke RGB_565 buat hemat memori.
-                Bitmap copy = bitmap.copy(Bitmap.Config.RGB_565, false);
-                if (copy != null) {
-                    cachedFrames.add(copy);
-                }
-            }
-
-            @Override
-            public void onComplete() {
-                if (videoPlaybackState != VideoPlaybackState.LOADING_CACHE) {
-                    return; // sudah keburu fallback ke live sebelum sempat onComplete
-                }
-                if (cachedFrames.isEmpty()) {
-                    // Gagal dapat frame sama sekali - jaga-jaga fallback ke live.
-                    abandonCacheAndFallbackToLive(w, h);
-                    return;
-                }
-                videoPlaybackState = VideoPlaybackState.CACHED;
-                Log.d(TAG, "Cache video selesai: " + cachedFrames.size() + " frame @" + w + "x" + h);
-                stopDecoderAsync(prefetchDecoder);
-                prefetchDecoder = null;
-            }
-
-            @Override
-            public void onError(Exception e) {
-                Log.e(TAG, "Prefetch decoder error, fallback ke live-streaming", e);
-                abandonCacheAndFallbackToLive(w, h);
-            }
-        });
-        prefetchDecoder.start();
+    private void initGl() {
+        setupEgl();
+        oesProgram = createProgram(VERTEX_SHADER, FRAGMENT_SHADER_OES);
+        rgbaProgram = createProgram(VERTEX_SHADER, FRAGMENT_SHADER_RGBA);
+        vertexBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        vertexBuffer.put(new float[]{-1, -1, 1, -1, -1, 1, 1, 1}).position(0);
+        texCoordBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+        texCoordBuffer.put(new float[]{0, 0, 1, 0, 0, 1, 1, 1}).position(0);
     }
 
-    /** Buang cache parsial & pindah ke mode decode real-time terus-menerus (loop=true). */
-    private synchronized void abandonCacheAndFallbackToLive(int w, int h) {
-        if (videoPlaybackState == VideoPlaybackState.LIVE_STREAM) {
-            return; // sudah fallback sebelumnya, jangan dobel start decoder
+    private void setupEgl() {
+        eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+        int[] ver = new int[2];
+        EGL14.eglInitialize(eglDisplay, ver, 0, ver, 1);
+        int[] attr = { EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
+                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL14.EGL_NONE };
+        EGLConfig[] configs = new EGLConfig[1];
+        int[] num = new int[1];
+        EGL14.eglChooseConfig(eglDisplay, attr, 0, configs, 0, 1, num, 0);
+        int[] ctxAttr = { EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE };
+        eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttr, 0);
+        int[] surfAttr = { EGL14.EGL_NONE };
+        eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, configs[0], targetSurface, surfAttr, 0);
+        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext);
+    }
+
+    private void drawTexture(int program, int texId, float[] matrix, boolean isOes) {
+        GLES20.glUseProgram(program);
+        int posLoc = GLES20.glGetAttribLocation(program, "aPosition");
+        int texLoc = GLES20.glGetAttribLocation(program, "aTexCoord");
+        int mtxLoc = GLES20.glGetUniformLocation(program, "uMatrix");
+        GLES20.glEnableVertexAttribArray(posLoc);
+        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
+        GLES20.glEnableVertexAttribArray(texLoc);
+        GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
+        GLES20.glUniformMatrix4fv(mtxLoc, 1, false, matrix, 0);
+        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
+        GLES20.glBindTexture(isOes ? GLES11Ext.GL_TEXTURE_EXTERNAL_OES : GLES20.GL_TEXTURE_2D, texId);
+        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    private void releaseGl() {
+        if (videoDecoder != null) {
+            videoDecoder.detachFromGLContext();
         }
-        videoPlaybackState = VideoPlaybackState.LIVE_STREAM;
-
-        recycleCachedFrames();
-        stopDecoderAsync(prefetchDecoder);
-        prefetchDecoder = null;
-
-        liveDecoder = new VideoTextureDecoder(context, videoUri, w, h, true,
-                bitmap -> {
-                    synchronized (liveFrameLock) {
-                        latestLiveFrame = bitmap;
-                    }
-                });
-        liveDecoder.start();
+        if (videoTextureId != 0) {
+            GLES20.glDeleteTextures(1, new int[]{videoTextureId}, 0);
+            videoTextureId = 0;
+        }
+        if (imageTextureId != 0) {
+            GLES20.glDeleteTextures(1, new int[]{imageTextureId}, 0);
+            imageTextureId = 0;
+        }
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+            EGL14.eglDestroySurface(eglDisplay, eglSurface);
+            EGL14.eglDestroyContext(eglDisplay, eglContext);
+        }
     }
 
-    /**
-     * Panggil decoder.stop() di thread LAIN (bukan thread saat ini). Wajib dipakai kalau
-     * pemanggilan terjadi dari DALAM callback milik decoder itu sendiri (onFrame/onComplete/
-     * onError berjalan di GL-handler-thread internal VideoTextureDecoder) - decoder.stop() yang
-     * asli itu blocking (post + wait ke thread yang sama), jadi kalau dipanggil langsung dari
-     * thread-nya sendiri akan DEADLOCK.
-     */
-    private void stopDecoderAsync(final VideoTextureDecoder decoder) {
-        if (decoder == null) return;
-        new Thread(decoder::stop, "FakeSceneVideoSource-decoder-stop").start();
+    private int createProgram(String vs, String fs) {
+        int v = loadShader(GLES20.GL_VERTEX_SHADER, vs);
+        int f = loadShader(GLES20.GL_FRAGMENT_SHADER, fs);
+        int p = GLES20.glCreateProgram();
+        GLES20.glAttachShader(p, v);
+        GLES20.glAttachShader(p, f);
+        GLES20.glLinkProgram(p);
+        return p;
     }
 
-    /**
-     * Draw-loop tunggal buat semua mode. Pacing pakai jadwal absolut berbasis nanoTime + fps
-     * asli dari encoder, bukan hardcode 33ms dengan sleep dihitung dari elapsed loop saat ini
-     * saja (drift menumpuk seiring waktu). Lihat penjelasan sama di CompositeSceneVideoSource.
-     */
-    private void startDrawLoop() {
-        drawThread = new Thread(() -> {
-            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-            Paint fadePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-
-            long frameIntervalNs = 1_000_000_000L / Math.max(1, targetFps);
-            long nextFrameTimeNs = System.nanoTime();
-            int cacheFrameIndex = 0;
-            fadeStartNs = fadeFromSnapshot != null ? System.nanoTime() : -1L;
-
-            while (running && targetSurface != null && targetSurface.isValid()) {
-                long now = System.nanoTime();
-                if (now < nextFrameTimeNs) {
-                    long sleepNs = nextFrameTimeNs - now;
-                    try {
-                        Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
-                    } catch (InterruptedException e) {
-                        break;
-                    }
-                }
-
-                Canvas surfaceCanvas = null;
-                try {
-                    surfaceCanvas = targetSurface.lockCanvas(null);
-                    if (surfaceCanvas != null) {
-                        int cW = surfaceCanvas.getWidth();
-                        int cH = surfaceCanvas.getHeight();
-
-                        synchronized (frameBufferLock) {
-                            if (frameBuffer == null || frameBuffer.getWidth() != cW || frameBuffer.getHeight() != cH) {
-                                if (frameBuffer != null && !frameBuffer.isRecycled()) frameBuffer.recycle();
-                                frameBuffer = Bitmap.createBitmap(cW, cH, Bitmap.Config.ARGB_8888);
-                            }
-                            Canvas bufCanvas = new Canvas(frameBuffer);
-                            bufCanvas.drawColor(Color.BLACK);
-
-                            Bitmap frame = null;
-                            if (mode == Mode.STATIC_IMAGE) {
-                                frame = staticImage;
-                            } else {
-                                switch (videoPlaybackState) {
-                                    case CACHED:
-                                        if (!cachedFrames.isEmpty()) {
-                                            frame = cachedFrames.get(cacheFrameIndex % cachedFrames.size());
-                                            cacheFrameIndex++;
-                                        }
-                                        break;
-                                    case LOADING_CACHE:
-                                        // FIX: dulu freeze di frame pertama selama loading (kelihatan
-                                        // "berhenti"/patah). Sekarang ikut jalan lewat frame yang SUDAH
-                                        // ke-decode sejauh ini (di-clamp, tidak lompat ke frame yang
-                                        // belum ada) - dipacing draw-loop ini sendiri (targetFps),
-                                        // jadi kelihatan main normal, bukan freeze. Begitu
-                                        // videoPlaybackState pindah ke CACHED, cacheFrameIndex sudah
-                                        // nyambung di posisi yang sama - tidak ada lompatan/glitch.
-                                        if (!cachedFrames.isEmpty()) {
-                                            int loadIdx = Math.min(cacheFrameIndex, cachedFrames.size() - 1);
-                                            frame = cachedFrames.get(loadIdx);
-                                            if (cacheFrameIndex < cachedFrames.size() - 1) {
-                                                cacheFrameIndex++;
-                                            }
-                                        }
-                                        break;
-                                    case LIVE_STREAM:
-                                    default:
-                                        synchronized (liveFrameLock) {
-                                            frame = latestLiveFrame;
-                                        }
-                                        break;
-                                }
-                            }
-
-                            if (frame != null && !frame.isRecycled()) {
-                                Rect dst = fitCenterRect(frame.getWidth(), frame.getHeight(), cW, cH);
-                                bufCanvas.drawBitmap(frame, null, dst, paint);
-                            }
-
-                            // Cross-dissolve: kalau baru saja transisi dari scene lain, blend
-                            // snapshot scene lama di atas dengan alpha yang makin turun sampai
-                            // FADE_DURATION_NS terlampaui, lalu snapshot dibuang (tidak dipakai lagi).
-                            Bitmap fadeSnap = fadeFromSnapshot;
-                            if (fadeSnap != null && !fadeSnap.isRecycled() && fadeStartNs >= 0) {
-                                long elapsed = System.nanoTime() - fadeStartNs;
-                                if (elapsed >= FADE_DURATION_NS) {
-                                    fadeFromSnapshot = null;
-                                    fadeSnap.recycle();
-                                } else {
-                                    float t = 1f - ((float) elapsed / FADE_DURATION_NS); // 1 -> 0
-                                    fadePaint.setAlpha(Math.round(t * 255f));
-                                    bufCanvas.drawBitmap(fadeSnap, null, new Rect(0, 0, cW, cH), fadePaint);
-                                }
-                            }
-
-                            surfaceCanvas.drawBitmap(frameBuffer, 0, 0, null);
-                        }
-                    }
-                } finally {
-                    if (surfaceCanvas != null) {
-                        targetSurface.unlockCanvasAndPost(surfaceCanvas);
-                    }
-                }
-
-                nextFrameTimeNs += frameIntervalNs;
-                long lagNs = System.nanoTime() - nextFrameTimeNs;
-                if (lagNs > frameIntervalNs) {
-                    nextFrameTimeNs = System.nanoTime();
-                }
-            }
-        }, "FakeSceneVideoSource-draw");
-        drawThread.start();
+    private int loadShader(int type, String src) {
+        int s = GLES20.glCreateShader(type);
+        GLES20.glShaderSource(s, src);
+        GLES20.glCompileShader(s);
+        return s;
     }
 
-    private Rect fitCenterRect(int srcW, int srcH, int dstW, int dstH) {
-        float scale = Math.min((float) dstW / srcW, (float) dstH / srcH);
-        int w = Math.round(srcW * scale);
-        int h = Math.round(srcH * scale);
-        int left = (dstW - w) / 2;
-        int top = (dstH - h) / 2;
-        return new Rect(left, top, left + w, top + h);
-    }
+    private static final String VERTEX_SHADER =
+            "uniform mat4 uMatrix;\n" +
+                    "attribute vec4 aPosition;\n" +
+                    "attribute vec2 aTexCoord;\n" +
+                    "varying vec2 vTexCoord;\n" +
+                    "void main() {\n" +
+                    "  gl_Position = aPosition;\n" +
+                    "  vTexCoord = (uMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;\n" +
+                    "}\n";
+
+    private static final String FRAGMENT_SHADER_OES =
+            "#extension GL_OES_EGL_image_external : require\n" +
+                    "precision mediump float;\n" +
+                    "varying vec2 vTexCoord;\n" +
+                    "uniform samplerExternalOES sTexture;\n" +
+                    "void main() {\n" +
+                    "  gl_FragColor = texture2D(sTexture, vTexCoord);\n" +
+                    "}\n";
+
+    private static final String FRAGMENT_SHADER_RGBA =
+            "precision mediump float;\n" +
+                    "varying vec2 vTexCoord;\n" +
+                    "uniform sampler2D sTexture;\n" +
+                    "void main() {\n" +
+                    "  gl_FragColor = texture2D(sTexture, vTexCoord);\n" +
+                    "}\n";
+
+    @Override public void setFadeFromSnapshot(Bitmap s) {}
+    @Override public Bitmap peekCurrentFrame() { return null; }
 }

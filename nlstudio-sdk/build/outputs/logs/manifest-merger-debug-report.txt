@@ -1,16 +1,16 @@
 -- Merging decision tree log ---
 manifest
-ADDED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml:2:13-83
-INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml:2:13-83
+ADDED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml:2:13-83
+INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml:2:13-83
 	package
-		INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml
+		INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml
 	xmlns:android
-		ADDED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml:2:23-81
+		ADDED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml:2:23-81
 uses-sdk
-INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml reason: use-sdk injection requested
-INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml
-INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml
+INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml reason: use-sdk injection requested
+INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml
+INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml
 	android:targetSdkVersion
-		INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml
+		INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml
 	android:minSdkVersion
-		INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest5855991761668712525.xml
+		INJECTED from /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/intermediates/tmp/ProcessLibraryManifest/debug/tempAndroidManifest8880390937154899076.xml
