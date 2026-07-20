@@ -35,7 +35,7 @@ data class Scene(
     val id: String,
     var name: String,
     val backgroundType: BackgroundType,
-    val backgroundUri: String? = null,           // null utk SCREEN & COLOR
+    var backgroundUri: String? = null,           // null utk SCREEN & COLOR
     val layers: MutableList<SceneLayer> = mutableListOf(),
     val thumbnailPath: String? = null,             // hasil composite background+layers, dipakai buat preview list
     var rootWidth: Int = 1080,

@@ -84,6 +84,13 @@ object VideoOptimizer {
         return Pair(newW, newH)
     }
 
+    // Batas bawah/atas short-side yang masuk akal untuk custom scale. Ini jaga-jaga kalau
+    // scaleSetting yang masuk ternyata bukan format "angka+p" yang diharapkan (mis. "4K" akan
+    // ke-parse jadi cuma angka "4" oleh filter{isDigit()} di bawah - tanpa batas ini hasilnya
+    // video 2x2 piksel, bukan error yang kelihatan).
+    private const val MIN_CUSTOM_SHORT_SIDE = 160
+    private const val MAX_CUSTOM_SHORT_SIDE = 4320 // 8K, jauh di atas kebutuhan background video
+
     /**
      * Menghitung resolusi berdasarkan pilihan user (misal 720p).
      * Jika resolusi pilihan lebih besar atau sama dengan canvas, fallback ke "Default" (satu tingkat di bawah canvas).
@@ -91,7 +98,14 @@ object VideoOptimizer {
     private fun computeCustomResolution(canvasW: Int, canvasH: Int, scaleSetting: String): Pair<Int, Int> {
         val requestedShortSide = try {
             scaleSetting.filter { it.isDigit() }.toInt()
-        } catch (e: Exception) {
+        } catch (_: Exception) {
+            Log.w(TAG, "scaleSetting '$scaleSetting' tidak mengandung angka, fallback ke Default")
+            return computeDownscaledResolution(canvasW, canvasH)
+        }
+
+        if (requestedShortSide !in MIN_CUSTOM_SHORT_SIDE..MAX_CUSTOM_SHORT_SIDE) {
+            Log.w(TAG, "scaleSetting '$scaleSetting' -> $requestedShortSide di luar rentang wajar " +
+                    "($MIN_CUSTOM_SHORT_SIDE-$MAX_CUSTOM_SHORT_SIDE), fallback ke Default")
             return computeDownscaledResolution(canvasW, canvasH)
         }
 
@@ -100,6 +114,8 @@ object VideoOptimizer {
         // Fallback: tidak boleh melebihi atau sama dengan resolusi canvas.
         // Jika user set canvas 720p dan pilih scale 720p, tetap turunkan (Default behavior).
         if (requestedShortSide >= canvasShortSide) {
+            Log.d(TAG, "scaleSetting '$scaleSetting' ($requestedShortSide) >= canvas short side " +
+                    "($canvasShortSide), pakai Default (satu tingkat di bawah canvas) sebagai gantinya")
             return computeDownscaledResolution(canvasW, canvasH)
         }
 
@@ -111,12 +127,9 @@ object VideoOptimizer {
 
     /**
      * Cek apakah device punya encoder hardware yang support HEVC (H.265).
-     * HEVC bisa hemat ~35-40% bitrate dibanding H.264 di kualitas visual yang setara,
-     * tapi tidak semua HP (terutama yang low-end/lama) punya encoder HEVC yang stabil,
-     * jadi ini WAJIB dicek dulu, jangan diasumsikan selalu ada.
      */
-    private fun isHevcEncodingSupported(): Boolean {
-        return try {
+    private val isHevcSupported: Boolean by lazy {
+        try {
             val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
             codecList.codecInfos.any { info ->
                 info.isEncoder && info.supportedTypes.any { it.equals(MimeTypes.VIDEO_H265, ignoreCase = true) }
@@ -180,7 +193,7 @@ object VideoOptimizer {
         val evenW = max(2, if (downscaledW % 2 == 0) downscaledW else downscaledW - 1)
         val evenH = max(2, if (downscaledH % 2 == 0) downscaledH else downscaledH - 1)
 
-        val useHevc = !forceH264 && isHevcEncodingSupported()
+        val useHevc = !forceH264 && isHevcSupported
         val codecTag = if (useHevc) "h265" else "h264"
 
         // Generate a unique filename based on URI, resolusi hasil-encode, dan codec
@@ -365,6 +378,7 @@ object VideoOptimizer {
      * yang paling baru diperbarui. Bisa dipakai untuk menampilkan "Cache Manager" di UI, atau
      * sekadar debugging berapa banyak ruang yang dipakai video cache.
      */
+    @Synchronized
     fun getCachedVideoManifest(context: Context): List<CachedVideoEntry> {
         val array = readManifest(context)
         val result = mutableListOf<CachedVideoEntry>()
@@ -408,5 +422,80 @@ object VideoOptimizer {
         } catch (e: Exception) {
             Log.w(TAG, "Gagal menghapus cache video: $outputUriString", e)
         }
+    }
+
+    /**
+     * Helper untuk mendapatkan URI asli dari video yang sudah di-optimize.
+     * Mencari di manifest berdasarkan path file output.
+     */
+    fun getOriginalUri(context: Context, optimizedUri: String): Uri? {
+        val path = try { Uri.parse(optimizedUri).path ?: "" } catch (_: Exception) { "" }
+        if (path.isEmpty()) return null
+        return getCachedVideoManifest(context).find { it.outputFile == path }?.let { Uri.parse(it.sourceUri) }
+    }
+
+    /**
+     * Mengecek apakah video tertentu perlu di-optimize ulang berdasarkan setting saat ini.
+     * Berguna untuk menentukan apakah perlu menampilkan progress dialog ke user saat Record/Live.
+     *
+     * @param originalUri URI video asli (sebelum di-optimize).
+     * @param currentOptimizedUri URI video yang saat ini tersimpan di scene (bisa original, bisa optimized).
+     * @param targetW/targetH Ukuran Canvas saat ini.
+     * @param scaleSetting Setting skala video background (misal "Default", "720p").
+     * @return true jika video perlu di-scale ulang (karena setting berubah atau file hilang).
+     */
+    fun isOptimizationRequired(
+        context: Context,
+        originalUri: Uri,
+        currentOptimizedUri: String?,
+        targetW: Int,
+        targetH: Int,
+        scaleSetting: String = "Default"
+    ): Boolean {
+        // 1. Jika belum ada video ter-optimize sama sekali, atau URI-nya masih URI asli
+        if (currentOptimizedUri.isNullOrEmpty()) return true
+        
+        // Jika URI saat ini sama dengan URI asli, berarti belum di-optimize
+        if (originalUri.toString() == currentOptimizedUri) return true
+
+        // 2. Jika URI-nya tidak berada di folder cache "optimized_videos", anggap belum di-optimize
+        if (!currentOptimizedUri.contains("optimized_videos")) return true
+
+        // 3. Hitung resolusi yang seharusnya (target) sesuai setting sekarang (termasuk fallback logic)
+        val (downscaledW, downscaledH) = if (scaleSetting == "Default" || scaleSetting.isEmpty()) {
+            computeDownscaledResolution(targetW, targetH)
+        } else {
+            computeCustomResolution(targetW, targetH, scaleSetting)
+        }
+        val evenW = max(2, if (downscaledW % 2 == 0) downscaledW else downscaledW - 1)
+        val evenH = max(2, if (downscaledH % 2 == 0) downscaledH else downscaledH - 1)
+        
+        // 4. Cek di manifest apakah file tersebut benar punya resolusi sesuai target
+        val manifest = getCachedVideoManifest(context)
+        val currentPath = try { Uri.parse(currentOptimizedUri).path ?: "" } catch (_: Exception) { "" }
+        val entry = manifest.find { it.outputFile == currentPath }
+        
+        if (entry != null) {
+            // Jika resolusi di manifest berbeda dengan target sekarang, berarti setting berubah (Misal dari 720p ke 480p)
+            if (entry.width != evenW || entry.height != evenH) {
+                Log.d(TAG, "Re-optimization required: Current ${entry.width}x${entry.height} != Target ${evenW}x${evenH}")
+                return true
+            }
+            
+            // Cek codec juga (siapa tau device baru support HEVC atau sebaliknya)
+            val useHevc = isHevcSupported
+            val expectedCodec = if (useHevc) "h265" else "h264"
+            if (entry.codec != expectedCodec) return true
+        } else {
+            // Jika tidak ada di manifest, kita verifikasi fisik filenya saja
+            if (currentPath.isEmpty() || !File(currentPath).exists()) return true
+            
+            // Jika file ada tapi tidak ada di manifest, kita tidak bisa menjamin resolusinya pas, 
+            // jadi lebih aman kita kembalikan true supaya di-optimize ulang secara valid.
+            return true
+        }
+        
+        // 5. Terakhir, pastikan filenya masih ada secara fisik
+        return !File(currentPath).exists()
     }
 }

@@ -1481,12 +1481,111 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isEmpty()) {
-            startPreCachingAllNecessary {
-                requestScreenCapture()
+            checkAndOptimizeAllVideos {
+                startPreCachingAllNecessary {
+                    requestScreenCapture()
+                }
             }
         } else {
             permissionLauncher.launch(missing.toTypedArray())
         }
+    }
+
+    /**
+     * Mengecek semua scene dan melakukan re-scale video background jika resolusi target berubah.
+     * Ini dipanggil sesaat sebelum Live/Record dimulai untuk memastikan efisiensi decoding.
+     */
+    private fun checkAndOptimizeAllVideos(onComplete: () -> Unit) {
+        val (targetW, targetH) = getTargetResolution()
+        val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
+        val bgScale = prefs.getString("video_bg_scale", "Default (Optimize Auto)") ?: "Default (Optimize Auto)"
+
+        val scenesToOptimize = scenes.filter { scene ->
+            if (scene.backgroundType != BackgroundType.VIDEO || scene.backgroundUri.isNullOrEmpty()) return@filter false
+
+            val originalUri = VideoOptimizer.getOriginalUri(this, scene.backgroundUri!!)
+                ?: Uri.parse(scene.backgroundUri)
+
+            VideoOptimizer.isOptimizationRequired(this, originalUri, scene.backgroundUri, targetW, targetH, bgScale)
+        }
+
+        if (scenesToOptimize.isEmpty()) {
+            onComplete()
+            return
+        }
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_loading, null)
+        val progressBar = dialogView.findViewById<ProgressBar>(R.id.progressBar)
+        val tvProgress = dialogView.findViewById<TextView>(R.id.tvLoadingText)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Optimasi Video Background")
+            .setMessage("Resolusi target berubah, menyesuaikan video di setiap scene...")
+            .setView(dialogView)
+            .setCancelable(false)
+            .show()
+
+        var currentIdx = 0
+
+        fun optimizeNext() {
+            if (currentIdx >= scenesToOptimize.size) {
+                runOnUiThread {
+                    if (dialog.isShowing) dialog.dismiss()
+                    onComplete()
+                }
+                return
+            }
+
+            val scene = scenesToOptimize[currentIdx]
+            val originalUri = VideoOptimizer.getOriginalUri(this, scene.backgroundUri!!)
+                ?: Uri.parse(scene.backgroundUri)
+
+            runOnUiThread {
+                tvProgress.text = "Mengoptimalkan (${scene.name}) - ${currentIdx + 1}/${scenesToOptimize.size}"
+                progressBar.progress = (currentIdx * 100 / scenesToOptimize.size)
+            }
+
+            VideoOptimizer.optimize(
+                context = this,
+                inputUri = originalUri,
+                targetW = targetW,
+                targetH = targetH,
+                scaleSetting = bgScale,
+                sceneName = scene.name,
+                listener = object : VideoOptimizer.Listener {
+                    override fun onSuccess(outputUri: Uri) {
+                        // Hapus file cache lama
+                        val oldUri = scene.backgroundUri
+                        
+                        // Update URI di scene
+                        scene.backgroundUri = outputUri.toString()
+                        sceneRepository.saveScenes(scenes) // Simpan semua ke disk
+
+                        // Jika ini scene yang sedang aktif di editor, update state-nya
+                        if (scene.id == activeSceneId) {
+                            editingBackgroundUri = outputUri.toString()
+                            runOnUiThread { refreshCanvasBackground() }
+                        }
+                        
+                        // Hapus file fisik lama JIKA itu file cache
+                        oldUri?.takeIf { it.startsWith("file://") && it != outputUri.toString() }?.let {
+                            VideoOptimizer.deleteCachedOutputFile(this@MainActivity, it)
+                        }
+
+                        currentIdx++
+                        optimizeNext()
+                    }
+
+                    override fun onError(e: Exception) {
+                        Log.e(TAG, "Gagal optimasi otomatis scene ${scene.name}", e)
+                        currentIdx++
+                        optimizeNext()
+                    }
+                }
+            )
+        }
+
+        optimizeNext()
     }
 
     /**
