@@ -35,11 +35,15 @@ public class MusicBus {
 
     private Bitmap cachedCurrentBitmap;
     private int cachedCurrentW = -1, cachedCurrentH = -1;
-    private String lastCurrentJsonRendered;
 
     private Bitmap cachedQueueBitmap;
     private int cachedQueueW = -1, cachedQueueH = -1;
     private String lastQueueJsonRendered;
+
+    private View cachedCurrentView;
+    private String lastViewJson;
+    private float currentRotation = 0f;
+    private long lastRenderTime = 0;
 
     private final Map<String, Bitmap> thumbCache = new HashMap<>();
     private final ExecutorService loader = Executors.newSingleThreadExecutor();
@@ -93,12 +97,21 @@ public class MusicBus {
     }
 
     public Bitmap renderCurrentSong(Context context, int w, int h) {
-        if (w <= 0 || h <= 0 || currentSongJson == null) return null;
-
-        if (cachedCurrentBitmap != null && cachedCurrentW == w && cachedCurrentH == h && currentSongJson.equals(lastCurrentJsonRendered)) {
-            return cachedCurrentBitmap;
+        if (w <= 0 || h <= 0 || currentSongJson == null) {
+            lastRenderTime = 0;
+            return null;
         }
 
+        long now = System.currentTimeMillis();
+        if (lastRenderTime > 0) {
+            float dt = (now - lastRenderTime) / 1000f;
+            currentRotation += dt * 15f; // 15 degrees per second
+            if (currentRotation >= 360f) currentRotation -= 360f;
+        }
+        lastRenderTime = now;
+
+        // Note: We bypass the "same JSON" check for the bitmap cache because we want to animate.
+        // However, we still reuse the bitmap if size matches.
         if (cachedCurrentBitmap == null || cachedCurrentW != w || cachedCurrentH != h) {
             if (cachedCurrentBitmap != null) cachedCurrentBitmap.recycle();
             cachedCurrentBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
@@ -109,7 +122,6 @@ public class MusicBus {
         }
 
         Canvas canvas = new Canvas(cachedCurrentBitmap);
-        lastCurrentJsonRendered = currentSongJson;
 
         try {
             JSONObject obj = new JSONObject(currentSongJson);
@@ -118,13 +130,16 @@ public class MusicBus {
             String reqBy = obj.optString("requestedBy", "");
             String thumbUrl = obj.optString("thumbnail");
 
-            Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
-            View view = LayoutInflater.from(themeContext).inflate(R.layout.item_music_current, null);
+            if (cachedCurrentView == null || !currentSongJson.equals(lastViewJson)) {
+                Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
+                cachedCurrentView = LayoutInflater.from(themeContext).inflate(R.layout.item_music_current, null);
+                lastViewJson = currentSongJson;
+            }
             
-            TextView tvTitle = view.findViewById(R.id.tv_music_title);
-            TextView tvChannel = view.findViewById(R.id.tv_music_channel);
-            TextView tvReq = view.findViewById(R.id.tv_music_requested);
-            ImageView ivThumb = view.findViewById(R.id.iv_music_thumb);
+            TextView tvTitle = cachedCurrentView.findViewById(R.id.tv_music_title);
+            TextView tvChannel = cachedCurrentView.findViewById(R.id.tv_music_channel);
+            TextView tvReq = cachedCurrentView.findViewById(R.id.tv_music_requested);
+            ImageView ivThumb = cachedCurrentView.findViewById(R.id.iv_music_thumb);
 
             if (tvTitle != null) tvTitle.setText(title);
             if (tvChannel != null) tvChannel.setText(channel);
@@ -137,18 +152,21 @@ public class MusicBus {
                 }
             }
 
-            if (ivThumb != null && thumbUrl != null) {
-                Bitmap thumb;
-                synchronized (thumbCache) { thumb = thumbCache.get(thumbUrl); }
-                if (thumb != null) {
-                    ivThumb.setImageBitmap(thumb);
+            if (ivThumb != null) {
+                ivThumb.setRotation(currentRotation);
+                if (thumbUrl != null) {
+                    Bitmap thumb;
+                    synchronized (thumbCache) { thumb = thumbCache.get(thumbUrl); }
+                    if (thumb != null) {
+                        ivThumb.setImageBitmap(thumb);
+                    }
                 }
             }
 
-            view.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+            cachedCurrentView.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
-            view.layout(0, 0, w, h);
-            view.draw(canvas);
+            cachedCurrentView.layout(0, 0, w, h);
+            cachedCurrentView.draw(canvas);
 
         } catch (Exception e) {
             Log.e("MusicBus", "Error rendering current song xml", e);
@@ -217,8 +235,11 @@ public class MusicBus {
         synchronized (this) {
             currentSongJson = null;
             queueJson = null;
-            lastCurrentJsonRendered = null;
             lastQueueJsonRendered = null;
+            cachedCurrentView = null;
+            lastViewJson = null;
+            currentRotation = 0f;
+            lastRenderTime = 0;
             if (cachedCurrentBitmap != null) {
                 cachedCurrentBitmap.recycle();
                 cachedCurrentBitmap = null;
