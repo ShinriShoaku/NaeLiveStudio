@@ -66,6 +66,8 @@ public class TikTokChatBus {
     private final Deque<ChatEntry> chatLines = new ArrayDeque<>();
     private final Object chatLock = new Object();
     private volatile boolean chatDirty = true;
+    private volatile boolean giftDirty = false;
+    private volatile boolean joinDirty = false;
 
     private volatile String lastGiftUser;
     private volatile String lastGiftName;
@@ -113,6 +115,7 @@ public class TikTokChatBus {
         lastGiftUrl = giftUrl;
         lastGiftCount = count;
         lastGiftTimestamp = System.currentTimeMillis();
+        giftDirty = true;
         preloadImage(giftUrl);
     }
 
@@ -120,6 +123,7 @@ public class TikTokChatBus {
         lastJoinUser = user;
         lastJoinProfileUrl = profileUrl;
         lastJoinTimestamp = System.currentTimeMillis();
+        joinDirty = true;
         preloadImage(profileUrl);
     }
 
@@ -167,6 +171,13 @@ public class TikTokChatBus {
     public boolean isConnected() { return connected; }
     public String getConnectedUsername() { return connectedUsername; }
 
+    public boolean isChatDirty() { return chatDirty; }
+    public boolean isGiftDirty() { return giftDirty; }
+    public boolean isJoinDirty() { return joinDirty; }
+
+    public void clearGiftDirty() { giftDirty = false; }
+    public void clearJoinDirty() { joinDirty = false; }
+
     /** Panggil saat live/record dimulai atau dihentikan supaya overlay tidak nyisa data sesi lama. */
     public void reset() {
         synchronized (chatLock) {
@@ -180,6 +191,7 @@ public class TikTokChatBus {
         lastGiftUser = null;
         lastGiftTimestamp = 0L;
         lastGiftRenderedTs = -1;
+        giftDirty = true;
         if (cachedGiftBitmap != null) {
             cachedGiftBitmap.recycle();
             cachedGiftBitmap = null;
@@ -187,6 +199,7 @@ public class TikTokChatBus {
         lastJoinUser = null;
         lastJoinTimestamp = 0L;
         lastJoinRenderedTs = -1;
+        joinDirty = true;
         if (cachedJoinBitmap != null) {
             cachedJoinBitmap.recycle();
             cachedJoinBitmap = null;
@@ -322,8 +335,6 @@ public class TikTokChatBus {
         if (lastJoinUser == null) return null;
         if (System.currentTimeMillis() - lastJoinTimestamp > JOIN_DISPLAY_MS) return null;
 
-        android.util.Log.d("TikTokChatBus", "Rendering Join Overlay for user: " + lastJoinUser);
-
         if (cachedJoinBitmap != null && cachedJoinW == w && cachedJoinH == h && lastJoinRenderedTs == lastJoinTimestamp) {
             return cachedJoinBitmap;
         }
@@ -379,8 +390,6 @@ public class TikTokChatBus {
                         View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
                 view.layout(0, 0, targetW, targetH);
                 view.draw(canvas);
-                
-                android.util.Log.d("TikTokChatBus", "Join Overlay drawn successfully");
             } catch (Exception e) {
                 android.util.Log.e("TikTokChatBus", "Error inflating/drawing join overlay", e);
             }

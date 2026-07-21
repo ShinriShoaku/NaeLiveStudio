@@ -98,6 +98,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     private Bitmap overlayBuffer;
     private Canvas overlayCanvas;
     private final Object overlayLock = new Object();
+    private boolean overlayDirty = true;
+    private final Rect scratchSrcRect = new Rect();
 
     // FIX "posisi kebalik" pas scene Layar HP (SCREEN): frame mentah dari StreamService berasal
     // langsung dari ImageReader (VirtualDisplay hasil MediaProjection, lihat
@@ -317,14 +319,47 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             if (overlayBuffer == null) {
                 overlayBuffer = Bitmap.createBitmap(designWidth, designHeight, Bitmap.Config.ARGB_8888);
                 overlayCanvas = new Canvas(overlayBuffer);
+                overlayDirty = true;
             }
+
+            // Check if any source is dirty to trigger a re-render of the overlay buffer
+            checkSourcesDirty();
+
+            if (!overlayDirty) {
+                // If not dirty, we still need to draw the cached overlay texture
+                GLES20.glEnable(GLES20.GL_BLEND);
+                GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+                drawTexture(rgbaProgram, overlayTextureId, flipMatrix, false);
+                GLES20.glDisable(GLES20.GL_BLEND);
+                return;
+            }
+
             overlayBuffer.eraseColor(Color.TRANSPARENT);
             boolean hasPendingOverlays = false;
 
             // Draw Background Image/Screen if active (Z-index effectively -1)
             if (backgroundType == BackgroundType.IMAGE && backgroundImage != null) {
                 scratchFullCanvasRect.set(0, 0, designWidth, designHeight);
-                overlayCanvas.drawBitmap(backgroundImage, null, scratchFullCanvasRect, paint);
+                
+                // Manual Center-Crop calculation for background image
+                float imgW = backgroundImage.getWidth();
+                float imgH = backgroundImage.getHeight();
+                float imgAspect = imgW / imgH;
+                float canvasAspect = (float) designWidth / designHeight;
+                
+                if (imgAspect > canvasAspect) {
+                    // Image wider than canvas
+                    int cropW = (int) (imgH * canvasAspect);
+                    int offset = (int) ((imgW - cropW) / 2);
+                    scratchSrcRect.set(offset, 0, offset + cropW, (int) imgH);
+                } else {
+                    // Image taller than canvas
+                    int cropH = (int) (imgW / canvasAspect);
+                    int offset = (int) ((imgH - cropH) / 2);
+                    scratchSrcRect.set(0, offset, (int) imgW, offset + cropH);
+                }
+                
+                overlayCanvas.drawBitmap(backgroundImage, scratchSrcRect, scratchFullCanvasRect, paint);
                 hasPendingOverlays = true;
             } else if (backgroundType == BackgroundType.SCREEN) {
                 StreamService svc = StreamService.getInstance();
@@ -349,6 +384,59 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             // Final flush for overlays on top
             if (hasPendingOverlays) {
                 flushOverlayCanvas();
+            }
+            overlayDirty = false;
+        }
+    }
+
+    private void checkSourcesDirty() {
+        // Particles and Voice Anim are always considered dirty because they animate/react every frame
+        for (Layer layer : layers) {
+            if (layer.type == LayerType.EFFECT || layer.type == LayerType.VOICE_ANIM) {
+                overlayDirty = true;
+                return;
+            }
+            if (layer.type == LayerType.MUSIC_CURRENT && MusicBus.getInstance().isCurrentSongActive()) {
+                overlayDirty = true; // Music info rotates every frame
+                return;
+            }
+        }
+
+        if (backgroundType == BackgroundType.SCREEN) {
+            StreamService svc = StreamService.getInstance();
+            if (svc != null && svc.isGlobalScreenDirty()) {
+                overlayDirty = true;
+                svc.clearGlobalScreenDirty();
+            }
+        }
+
+        TikTokChatBus chatBus = TikTokChatBus.getInstance();
+        if (chatBus.isChatDirty()) {
+            overlayDirty = true;
+            // chatDirty is cleared inside renderChatOverlay
+        }
+        if (chatBus.isGiftDirty()) {
+            overlayDirty = true;
+            chatBus.clearGiftDirty();
+        }
+        if (chatBus.isJoinDirty()) {
+            overlayDirty = true;
+            chatBus.clearJoinDirty();
+        }
+
+        MusicBus musicBus = MusicBus.getInstance();
+        if (musicBus.isQueueDirty()) {
+            overlayDirty = true;
+            musicBus.clearQueueDirty();
+        }
+
+        for (Layer layer : layers) {
+            if (layer.type == LayerType.SCREEN) {
+                StreamService svc = StreamService.getInstance();
+                if (svc != null && svc.isGlobalScreenDirty()) {
+                    overlayDirty = true;
+                    svc.clearGlobalScreenDirty();
+                }
             }
         }
     }

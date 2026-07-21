@@ -32,6 +32,7 @@ public class MusicBus {
 
     private String currentSongJson;
     private String queueJson;
+    private volatile boolean queueDirty = false;
 
     private Bitmap cachedCurrentBitmap;
     private int cachedCurrentW = -1, cachedCurrentH = -1;
@@ -51,6 +52,10 @@ public class MusicBus {
     private MusicBus() {}
 
     public synchronized void onTrackChanged(String title, String artist, String duration, String thumbnail) {
+        if (title == null || title.isEmpty()) {
+            currentSongJson = null;
+            return;
+        }
         try {
             JSONObject obj = new JSONObject();
             obj.put("title", title);
@@ -63,6 +68,10 @@ public class MusicBus {
     }
 
     public synchronized void onCurrentSongUpdate(String json) {
+        if (json == null || json.isEmpty() || json.equals("{}")) {
+            this.currentSongJson = null;
+            return;
+        }
         this.currentSongJson = json;
         try {
             JSONObject obj = new JSONObject(json);
@@ -71,7 +80,13 @@ public class MusicBus {
     }
 
     public synchronized void onQueueChanged(String json) {
+        if (json == null || json.isEmpty() || json.equals("[]")) {
+            this.queueJson = null;
+            this.queueDirty = true;
+            return;
+        }
         this.queueJson = json;
+        this.queueDirty = true;
         try {
             JSONArray arr = new JSONArray(json);
             for (int i = 0; i < arr.length(); i++) {
@@ -235,6 +250,7 @@ public class MusicBus {
         synchronized (this) {
             currentSongJson = null;
             queueJson = null;
+            queueDirty = true;
             lastQueueJsonRendered = null;
             cachedCurrentView = null;
             lastViewJson = null;
@@ -253,4 +269,9 @@ public class MusicBus {
             thumbCache.clear();
         }
     }
+
+    public synchronized boolean isCurrentSongActive() { return currentSongJson != null; }
+    public synchronized boolean isQueueActive() { return queueJson != null; }
+    public boolean isQueueDirty() { return queueDirty; }
+    public void clearQueueDirty() { queueDirty = false; }
 }

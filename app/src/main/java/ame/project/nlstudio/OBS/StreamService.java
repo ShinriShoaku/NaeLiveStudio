@@ -97,6 +97,7 @@ public class StreamService extends Service implements ConnectChecker {
     private ImageReader globalImageReader;
     private HandlerThread globalScreenThread;
     private Bitmap globalScreenBitmap;
+    private volatile boolean globalScreenDirty = false;
     private final Object globalScreenLock = new Object();
     private int globalCapW = 720;
     private int globalCapH = 1280;
@@ -506,6 +507,7 @@ public class StreamService extends Service implements ConnectChecker {
                 }
                 buffer.rewind();
                 globalScreenBitmap.copyPixelsFromBuffer(buffer);
+                globalScreenDirty = true;
             }
         } catch (Exception e) {
             Log.e(TAG, "updateGlobalScreenBitmap error", e);
@@ -517,6 +519,14 @@ public class StreamService extends Service implements ConnectChecker {
             if (globalScreenBitmap == null || globalScreenBitmap.isRecycled()) return null;
             return globalScreenBitmap;
         }
+    }
+
+    public boolean isGlobalScreenDirty() {
+        return globalScreenDirty;
+    }
+
+    public void clearGlobalScreenDirty() {
+        globalScreenDirty = false;
     }
 
     public Object getGlobalScreenLock() { return globalScreenLock; }

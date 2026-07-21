@@ -393,13 +393,13 @@ class MainActivity : AppCompatActivity() {
         // Initialize Video Disk Cache (Media3)
         VideoDiskCacheManager.getInstance(this)
 
-        Log.d(TAG, "=== onCreate ===")
-        Log.d(TAG, "DisplayMetrics: ${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}")
-        Log.d(TAG, "Orientation: ${resources.configuration.orientation}")
-        Log.d(TAG, "Loaded scenes: ${scenes.size}")
-        scenes.forEach { scene ->
-            Log.d(TAG, "  Scene[${scene.id}]: ${scene.name} | bg=${scene.backgroundType} | root=${scene.rootWidth}x${scene.rootHeight} | layers=${scene.layers.size}")
-        }
+        // Log.d(TAG, "=== onCreate ===")
+        // Log.d(TAG, "DisplayMetrics: ${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}")
+        // Log.d(TAG, "Orientation: ${resources.configuration.orientation}")
+        // Log.d(TAG, "Loaded scenes: ${scenes.size}")
+        // scenes.forEach { scene ->
+        //     Log.d(TAG, "  Scene[${scene.id}]: ${scene.name} | bg=${scene.backgroundType} | root=${scene.rootWidth}x${scene.rootHeight} | layers=${scene.layers.size}")
+        // }
 
         // Initialize adapter early to avoid UninitializedPropertyAccessException
         sceneAdapter = SceneAdapter(
@@ -1065,6 +1065,7 @@ class MainActivity : AppCompatActivity() {
             targetW to targetH
         }
 
+        /*
         Log.d(TAG, "=== saveCurrentEditingScene ===")
         Log.d(TAG, "  Name=$name, existingId=$safeExistingId")
         Log.d(TAG, "  editingForcedRootResolution=$editingForcedRootResolution")
@@ -1075,6 +1076,7 @@ class MainActivity : AppCompatActivity() {
         editingLayers.forEach { layer ->
             Log.d(TAG, "    Layer[${layer.id}]: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h} z=${layer.zIndex}")
         }
+        */
 
         val scene = sceneRepository.buildOrUpdateScene(
             existingId = safeExistingId,
@@ -1126,6 +1128,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Load scene yang udah tersimpan ke kanvas editor, biar bisa diedit lagi (posisi layer, background, dll). */
     private fun loadSceneIntoEditor(scene: Scene) {
+        /*
         Log.d(TAG, "=== loadSceneIntoEditor ===")
         Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
         Log.d(TAG, "  root=${scene.rootWidth}x${scene.rootHeight}")
@@ -1134,6 +1137,7 @@ class MainActivity : AppCompatActivity() {
         scene.layers.forEach { layer ->
             Log.d(TAG, "    Layer: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h}")
         }
+        */
 
         editingSceneId = scene.id
         editingBackgroundType = scene.backgroundType
