@@ -13,9 +13,9 @@
 
 ## 🖼️ Tampilan Aplikasi
 
-| Home Screen | Scene Editor | Live Stream |
-| :---: | :---: | :---: |
-| _(Coming Soon)_ | _(Coming Soon)_ | _(Coming Soon)_ |
+| Home Screen | Scene Editor | Live Stream | Settings |
+| :---: | :---: | :---: | :---: |
+| ![Home Screen](image/1.png) | ![Scene Editor](image/2.png) | ![Live Stream](image/3.png) | ![Settings](image/4.png) |
 
 ---
 

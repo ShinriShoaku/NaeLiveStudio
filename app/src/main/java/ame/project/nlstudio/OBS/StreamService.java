@@ -23,15 +23,22 @@ import android.media.MediaRecorder;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.widget.TextView;
 import android.widget.Toast;
+
+import ame.project.nlstudio.R;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
@@ -93,6 +100,26 @@ public class StreamService extends Service implements ConnectChecker {
     private final Object globalScreenLock = new Object();
     private int globalCapW = 720;
     private int globalCapH = 1280;
+
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
+    private String lastRtmpUrl = "";
+    private int retryCount = 0;
+    private static final int MAX_RETRIES = 3;
+
+    // AFK / Signal Saver state
+    private boolean isAfkActive = false;
+    private String lastSceneTypeBeforeAfk = null;
+    private String lastSceneJsonBeforeAfk = null;
+    private long currentBitrateBps = 0;
+    private final Handler afkHandler = new Handler(Looper.getMainLooper());
+    private final Runnable afkCheckRunnable = new Runnable() {
+        @Override
+        public void run() {
+            checkNetworkHealth();
+            afkHandler.postDelayed(this, 1000);
+        }
+    };
 
     /**
      * Diagnostik pakai reflection: dump semua method getter yang namanya mengandung
@@ -454,6 +481,50 @@ public class StreamService extends Service implements ConnectChecker {
         bindKanaeService();
     }
 
+    private void acquireLocks() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null && (wakeLock == null || !wakeLock.isHeld())) {
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NLStudio:StreamLock");
+                wakeLock.acquire();
+                Log.d(TAG, "WakeLock acquired");
+            }
+
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null && (wifiLock == null || !wifiLock.isHeld())) {
+                wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "NLStudio:WifiLock");
+                wifiLock.acquire();
+                Log.d(TAG, "WifiLock acquired");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to acquire locks", e);
+        }
+    }
+
+    private void releaseLocks() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+                Log.d(TAG, "WakeLock released");
+            }
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+                Log.d(TAG, "WifiLock released");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to release locks", e);
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        Log.w(TAG, "onTrimMemory level: " + level);
+        if (level >= TRIM_MEMORY_RUNNING_LOW) {
+            Log.w(TAG, "System memory running low, streaming might be affected");
+        }
+    }
+
     private final AudioLevelBus.Listener audioLevelListener = new AudioLevelBus.Listener() {
         @Override
         public void onLevels(float micLevel, float systemLevel, float musicLevel) {
@@ -562,10 +633,24 @@ public class StreamService extends Service implements ConnectChecker {
 
             if (ACTION_START.equals(action)) {
                 String rtmpUrl = intent.getStringExtra(EXTRA_RTMP_URL);
+                lastRtmpUrl = rtmpUrl;
+                retryCount = 0;
+                acquireLocks();
+
+                lastSceneTypeBeforeAfk = initialSceneType;
+                lastSceneJsonBeforeAfk = initialSceneJson;
+                afkHandler.removeCallbacks(afkCheckRunnable);
+                afkHandler.postDelayed(afkCheckRunnable, 5000);
+
                 startStreaming(resultCode, data, rtmpUrl, width, height, fps, vBitrate, aBitrate,
                         audioSourceIndex, encoderType, micGain, systemGain, musicGain, gameUid, initialSceneType, initialSceneJson);
             } else {
+                acquireLocks();
                 long durationMs = intent.getLongExtra(EXTRA_TEST_DURATION_MS, DEFAULT_TEST_DURATION_MS);
+
+                lastSceneTypeBeforeAfk = initialSceneType;
+                lastSceneJsonBeforeAfk = initialSceneJson;
+
                 startTestRecord(resultCode, data, width, height, fps, vBitrate, aBitrate, audioSourceIndex, encoderType, durationMs, micGain, systemGain, musicGain, gameUid, initialSceneType, initialSceneJson);
             }
         } else if (ACTION_STOP.equals(action)) {
@@ -574,6 +659,11 @@ public class StreamService extends Service implements ConnectChecker {
             String scene = intent.getStringExtra(EXTRA_SCENE_TYPE);
             Uri uri = intent.getParcelableExtra(EXTRA_SCENE_URI);
             String sceneJson = intent.getStringExtra(EXTRA_SCENE_JSON);
+            
+            if (!isAfkActive) {
+                lastSceneTypeBeforeAfk = scene;
+                lastSceneJsonBeforeAfk = sceneJson;
+            }
             switchScene(scene, uri, sceneJson);
         } else if (ACTION_UPDATE_AUDIO_GAIN.equals(action)) {
             float micGain = intent.getFloatExtra(EXTRA_MIC_GAIN, 1.0f);
@@ -717,9 +807,13 @@ public class StreamService extends Service implements ConnectChecker {
      * (single background thread, urut - tidak akan ada 2 switch tumpang tindih).
      */
     private void switchScene(String scene, Uri uri, String sceneJson) {
+        switchScene(scene, uri, sceneJson, null);
+    }
+
+    private void switchScene(String scene, Uri uri, String sceneJson, Bitmap afkBitmap) {
         Log.d(TAG, "switchScene: scene=" + scene + " uri=" + uri
-                + " sceneJson=" + sceneJson + " savedWidth/Height="
-                + savedWidth + "x" + savedHeight);
+                + " sceneJson=" + sceneJson + " afkBitmap=" + (afkBitmap != null)
+                + " savedWidth/Height=" + savedWidth + "x" + savedHeight);
         if (scene == null || savedMediaProjection == null) return;
 
         // Snapshot frame terakhir dari scene yang MASIH aktif sekarang, diambil SEBELUM di-stop().
@@ -749,8 +843,12 @@ public class StreamService extends Service implements ConnectChecker {
                 } else if (SCENE_COMPOSITE.equals(scene) && sceneJson != null) {
                     applyCompositeScene(sceneJson, fadeSnapshot);
 
-                } else if (SCENE_IMAGE.equals(scene) && uri != null) {
-                    Bitmap bitmap = loadBitmapFromUri(uri, savedWidth, savedHeight);
+                } else if (SCENE_IMAGE.equals(scene)) {
+                    Bitmap bitmap = afkBitmap;
+                    if (bitmap == null && uri != null) {
+                        bitmap = loadBitmapFromUri(uri, savedWidth, savedHeight);
+                    }
+                    
                     if (bitmap != null) {
                         FakeSceneVideoSource source = new FakeSceneVideoSource(this, bitmap);
                         source.setResolution(savedWidth, savedHeight);
@@ -1296,6 +1394,10 @@ public class StreamService extends Service implements ConnectChecker {
             savedMediaProjection = null;
         }
 
+        afkHandler.removeCallbacks(afkCheckRunnable);
+        isAfkActive = false;
+
+        releaseLocks();
         sendStatusBroadcast(finalMsg != null ? finalMsg : "Status: idle");
 
         stopForeground(true);
@@ -1357,17 +1459,122 @@ public class StreamService extends Service implements ConnectChecker {
 
     @Override
     public void onConnectionSuccess() {
+        retryCount = 0;
         sendStatusBroadcast("Live Streaming Aktif");
     }
 
     @Override
     public void onConnectionFailed(String reason) {
-        sendStatusBroadcast("Koneksi Gagal: " + reason);
-        stopEverything();
+        if (retryCount < MAX_RETRIES && !isStopping && lastRtmpUrl != null && !lastRtmpUrl.isEmpty()) {
+            retryCount++;
+            sendStatusBroadcast("Koneksi terputus, mencoba lagi (" + retryCount + ")...");
+            Log.w(TAG, "onConnectionFailed: retry " + retryCount + " for " + lastRtmpUrl + " reason: " + reason);
+            handler.postDelayed(() -> {
+                if (rtmpStream != null && !rtmpStream.isStreaming() && !isStopping) {
+                    rtmpStream.startStream(lastRtmpUrl);
+                }
+            }, 3000);
+        } else {
+            sendStatusBroadcast("Koneksi Gagal: " + reason);
+            stopEverything();
+        }
     }
 
     @Override
     public void onNewBitrate(long bitrate) {
+        currentBitrateBps = bitrate;
+    }
+
+    private void checkNetworkHealth() {
+        if (rtmpStream == null || !rtmpStream.isStreaming() || isStopping) {
+            return;
+        }
+
+        try {
+            // Monitor antrian data (cache) di stream client
+            int itemsInCache = rtmpStream.getStreamClient().getItemsInCache();
+            
+            // Threshold: 150 frame (~5 detik delay di 30fps)
+            if (!isAfkActive && itemsInCache > 150) {
+                Log.w(TAG, "Network congestion detected! Cache=" + itemsInCache + ". Entering AFK Mode.");
+                enterAfkMode();
+            } else if (isAfkActive && itemsInCache < 30) {
+                Log.i(TAG, "Network recovered. Cache=" + itemsInCache + ". Exiting AFK Mode.");
+                exitAfkMode();
+            }
+
+            if (isAfkActive) {
+                updateAfkOverlay();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error checking network health", e);
+        }
+    }
+
+    private void enterAfkMode() {
+        isAfkActive = true;
+        // Simpan scene yang sedang aktif agar bisa dikembalikan nanti
+        // Note: kita butuh tau apa scene tipenya dan JSON-nya.
+        // Untuk sederhana, kita asumsikan StreamService menyimpan state scene terakhir.
+        // Kita gunakan snapshot scene yang sekarang sebagai background statis? Tidak, user mau XML.
+        
+        Bitmap afkBitmap = renderAfkBitmap();
+        if (afkBitmap != null) {
+            // Ganti ke scene image statis (AFK)
+            // Kita panggil switchScene internal dengan scene image khusus
+            switchScene(SCENE_IMAGE, null, null, afkBitmap);
+        }
+    }
+
+    private void exitAfkMode() {
+        isAfkActive = false;
+        // Kembalikan ke scene sebelumnya
+        if (lastSceneTypeBeforeAfk != null) {
+            switchScene(lastSceneTypeBeforeAfk, null, lastSceneJsonBeforeAfk);
+        }
+    }
+
+    private void updateAfkOverlay() {
+        // Render ulang bitmap AFK dengan bitrate terbaru
+        Bitmap afkBitmap = renderAfkBitmap();
+        if (afkBitmap != null && rtmpStream != null) {
+            // Kita buat source baru dari bitmap AFK yang sudah di-update teks bitratenya.
+            // Tidak perlu fade snapshot di sini agar transisi angka bitrate terlihat langsung.
+            FakeSceneVideoSource source = new FakeSceneVideoSource(this, afkBitmap);
+            source.setResolution(savedWidth, savedHeight);
+            rtmpStream.changeVideoSource(source);
+            currentSceneSource = source;
+        }
+    }
+
+    private Bitmap renderAfkBitmap() {
+        try {
+            LayoutInflater inflater = LayoutInflater.from(this);
+            View view = inflater.inflate(R.layout.scene_afk, null);
+            
+            // Set ukuran view sesuai resolusi streaming
+            int width = savedWidth;
+            int height = savedHeight;
+            
+            view.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
+            view.layout(0, 0, width, height);
+
+            // Update info bitrate
+            TextView tvBitrate = view.findViewById(R.id.tv_afk_bitrate);
+            if (tvBitrate != null) {
+                long kbps = currentBitrateBps / 1024;
+                tvBitrate.setText("Bitrate: " + kbps + " kbps");
+            }
+
+            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(bitmap);
+            view.draw(canvas);
+            return bitmap;
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to render AFK bitmap", e);
+            return null;
+        }
     }
 
     @Override

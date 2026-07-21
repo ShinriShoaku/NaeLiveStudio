@@ -26,6 +26,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import androidx.recyclerview.widget.RecyclerView
@@ -468,6 +470,8 @@ class MainActivity : AppCompatActivity() {
         // Force UI update for initial scene even if panel not bound yet
         refreshCanvasBackground()
         refreshCanvasLayers()
+
+        checkBatteryOptimizations()
 
         btnSettings.setOnClickListener { showSettingsDialog() }
         btnVoiceAnim.setOnClickListener {
@@ -1487,6 +1491,25 @@ class MainActivity : AppCompatActivity() {
         )
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinnerGameAudioApp.adapter = adapter
+    }
+
+    private fun checkBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                AlertDialog.Builder(this)
+                    .setTitle("Optimasi Baterai Terdeteksi")
+                    .setMessage("Aplikasi ini membutuhkan pengecualian optimasi baterai agar streaming tidak terputus di latar belakang. Izinkan sekarang?")
+                    .setPositiveButton("Izinkan") { _, _ ->
+                        val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            data = Uri.parse("package:$packageName")
+                        }
+                        startActivity(intent)
+                    }
+                    .setNegativeButton("Nanti", null)
+                    .show()
+            }
+        }
     }
 
     /** Kirim perintah ganti scene ke StreamService yang lagi jalan (aman dipanggil walau service belum start). */
