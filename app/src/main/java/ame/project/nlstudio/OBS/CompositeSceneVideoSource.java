@@ -125,6 +125,16 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         android.opengl.Matrix.scaleM(flipMatrix, 0, 1f, -1f, 1f);
     }
 
+    // OPTIMASI: dulu di-allocate baru tiap frame di drawAllLayers()/drawScreenFrame() (30-60x/detik
+    // selama live berjam-jam -> GC churn & potensi micro-stutter). Draw loop cuma jalan di 1 thread
+    // (Composite-GPU-Thread), jadi aman dipakai sebagai scratch/reusable object di sini.
+    private final RectF scratchFullCanvasRect = new RectF();
+    private final RectF scratchScreenDrawRect = new RectF();
+
+    // OPTIMASI: DEBUG-RENDER dulu di-log SETIAP frame (30-60x/detik) dgn string concat tiap
+    // panggilan -> overhead CPU sia-sia di production build. Sekarang di-throttle max 1x/detik.
+    private long lastRenderLogNs = 0L;
+
     public CompositeSceneVideoSource(Context context, BackgroundType backgroundType,
                                      Bitmap backgroundImage, Uri backgroundVideoUri,
                                      List<Layer> layers, int width, int height) {
@@ -242,10 +252,10 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         releaseGl();
     }
 
-    /** Gambar 1 bitmap frame screen-capture ke Canvas. 
-     *  Menangani rotasi otomatis jika aspek rasio frame (misal portrait) beda jauh dengan 
+    /** Gambar 1 bitmap frame screen-capture ke Canvas.
+     *  Menangani rotasi otomatis jika aspek rasio frame (misal portrait) beda jauh dengan
      *  aspek rasio target (misal landscape), agar tidak stretch. */
-    private static void drawScreenFrame(Canvas canvas, Bitmap frame, RectF dst, Paint paint) {
+    private void drawScreenFrame(Canvas canvas, Bitmap frame, RectF dst, Paint paint) {
         if (frame == null || frame.isRecycled()) return;
 
         float frameW = frame.getWidth();
@@ -256,23 +266,28 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         float frameAspect = frameW / frameH;
         float dstAspect = dstW / dstH;
 
-        Log.d("Composite-GPU", "DEBUG-RENDER: Frame=" + frameW + "x" + frameH + " (asp=" + frameAspect + "), Dst=" + dstW + "x" + dstH + " (asp=" + dstAspect + ")");
-        
+        long now = System.nanoTime();
+        if (now - lastRenderLogNs > 1_000_000_000L) { // max 1x/detik, bukan tiap frame
+            lastRenderLogNs = now;
+           // Log.d("Composite-GPU", "DEBUG-RENDER: Frame=" + frameW + "x" + frameH + " (asp=" + frameAspect + "), Dst=" + dstW + "x" + dstH + " (asp=" + dstAspect + ")");
+        }
+
         // Deteksi apakah frame 'sideways landscape' (portrait capture tapi isinya landscape)
         // Biasanya terjadi saat HP portrait tapi app di dalamnya maksa landscape.
-        boolean isFramePortrait = frameAspect < 0.9f; 
+        boolean isFramePortrait = frameAspect < 0.9f;
         boolean isDstLandscape = dstAspect > 1.1f;
 
+        RectF drawRect = scratchScreenDrawRect;
         if (isFramePortrait && isDstLandscape) {
             // Kasus: HP Portrait tapi layer Landscape. Putar agar game tegak.
             canvas.save();
             canvas.rotate(-90, dst.centerX(), dst.centerY());
-            
+
             float scale = Math.min(dstW / frameH, dstH / frameW);
             float drawW = frameW * scale;
             float drawH = frameH * scale;
-            
-            RectF drawRect = new RectF(
+
+            drawRect.set(
                     dst.centerX() - drawW / 2f,
                     dst.centerY() - drawH / 2f,
                     dst.centerX() + drawW / 2f,
@@ -286,8 +301,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             float scale = Math.min(dstW / frameW, dstH / frameH);
             float drawW = frameW * scale;
             float drawH = frameH * scale;
-            
-            RectF drawRect = new RectF(
+
+            drawRect.set(
                     dst.centerX() - drawW / 2f,
                     dst.centerY() - drawH / 2f,
                     dst.centerX() + drawW / 2f,
@@ -308,7 +323,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
             // Draw Background Image/Screen if active (Z-index effectively -1)
             if (backgroundType == BackgroundType.IMAGE && backgroundImage != null) {
-                overlayCanvas.drawBitmap(backgroundImage, null, new RectF(0,0, designWidth, designHeight), paint);
+                scratchFullCanvasRect.set(0, 0, designWidth, designHeight);
+                overlayCanvas.drawBitmap(backgroundImage, null, scratchFullCanvasRect, paint);
                 hasPendingOverlays = true;
             } else if (backgroundType == BackgroundType.SCREEN) {
                 StreamService svc = StreamService.getInstance();
@@ -316,7 +332,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                     synchronized (svc.getGlobalScreenLock()) {
                         Bitmap bg = svc.getGlobalScreenFrame();
                         if (bg != null && !bg.isRecycled()) {
-                            drawScreenFrame(overlayCanvas, bg, new RectF(0,0, designWidth, designHeight), paint);
+                            scratchFullCanvasRect.set(0, 0, designWidth, designHeight);
+                            drawScreenFrame(overlayCanvas, bg, scratchFullCanvasRect, paint);
                             hasPendingOverlays = true;
                         }
                     }
@@ -649,29 +666,29 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                 }
 
                 paint.setARGB((int)(curAlpha * 255), (int)(p.r * 255), (int)(p.g * 255), (int)(p.b * 255));
-                
+
                 // Scale coordinate to layer bounds instead of full design resolution
                 float px = dst.left + (curX + 1f) / 2f * dst.width();
                 float py = dst.top + (curY + 1f) / 2f * dst.height();
-                
+
                 // Scale particle size based on layer width
                 float scaledSize = curSize * (dst.width() / width);
-                
+
                 // Draw simple shapes on canvas
                 if (p.shape == 1f) { // HEART approx
-                     canvas.drawCircle(px, py, scaledSize / 2f, paint);
+                    canvas.drawCircle(px, py, scaledSize / 2f, paint);
                 } else if (p.shape == 3f) { // DIAMOND
-                     canvas.drawRect(px - scaledSize/2, py - scaledSize/2, px + scaledSize/2, py + scaledSize/2, paint);
+                    canvas.drawRect(px - scaledSize/2, py - scaledSize/2, px + scaledSize/2, py + scaledSize/2, paint);
                 } else {
-                     canvas.drawCircle(px, py, scaledSize / 2f, paint);
+                    canvas.drawCircle(px, py, scaledSize / 2f, paint);
                 }
             }
             paint.setAlpha(255);
         }
 
         private boolean isPersistent(AnimationEffect e) {
-            return e == AnimationEffect.SNOW || e == AnimationEffect.CONFETTI || e == AnimationEffect.BUBBLES || 
-                   e == AnimationEffect.LEAVES || e == AnimationEffect.PETALS || e == AnimationEffect.STARDUST || e == AnimationEffect.HEARTS;
+            return e == AnimationEffect.SNOW || e == AnimationEffect.CONFETTI || e == AnimationEffect.BUBBLES ||
+                    e == AnimationEffect.LEAVES || e == AnimationEffect.PETALS || e == AnimationEffect.STARDUST || e == AnimationEffect.HEARTS;
         }
 
         private void spawnParticles(int count) {
@@ -689,16 +706,16 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             p.birthTime = System.currentTimeMillis();
             p.seed = random.nextFloat();
             p.seed2 = random.nextFloat() * 2f - 1f;
-            
+
             p.x0 = random.nextFloat() * 2f - 1f;
             p.y0 = (effect == AnimationEffect.SNOW || effect == AnimationEffect.CONFETTI) ? -1.1f : 1.1f;
             p.vx = random.nextFloat() * 0.4f - 0.2f;
             p.vy = (effect == AnimationEffect.SNOW || effect == AnimationEffect.CONFETTI) ? (random.nextFloat() * 0.3f + 0.2f) : -(random.nextFloat() * 0.3f + 0.2f);
-            
+
             p.r = random.nextFloat(); p.g = random.nextFloat(); p.b = random.nextFloat();
             p.life = random.nextFloat() * 2f + 2f;
             p.baseSize = random.nextFloat() * 20f + 10f;
-            
+
             if (effect == AnimationEffect.HEARTS) { p.r = 1f; p.g = 0.4f; p.b = 0.4f; p.shape = 1f; }
             else if (effect == AnimationEffect.SNOW) { p.r = 1f; p.g = 1f; p.b = 1f; p.shape = 0f; }
             else if (effect == AnimationEffect.CONFETTI) { p.shape = 3f; }
