@@ -379,61 +379,114 @@ public class StreamService extends Service implements ConnectChecker {
     private void unbindKanaeService() {
         if (!kanaeBound) return;
         try {
-            if (kanaeService != null) kanaeService.unregisterCallback(kanaeCallback);
-        } catch (Exception ignored) {
+            if (kanaeService != null) {
+                kanaeService.unregisterCallback(kanaeCallback);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Gagal unregisterCallback dari Kanae", e);
         }
         try {
             unbindService(kanaeConnection);
-        } catch (Exception ignored) {
+            Log.d(TAG, "unbindKanaeService: unbindService() sukses");
+        } catch (Exception e) {
+            Log.w(TAG, "unbindKanaeService gagal atau sudah tidak terikat", e);
         }
         kanaeService = null;
         kanaeBound = false;
     }
 
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // Deteksi rotasi lewat config change sebagai backup DisplayListener
+        Log.d(TAG, "DEBUG-ORIENTATION: onConfigurationChanged triggered");
+        handler.removeCallbacks(ensureRotationRunnable);
+        // 300ms sempat kepotong sebelum display benar2 settle di beberapa device -> capture
+        // kebentuk di orientasi transisi (gepeng). Dinaikkan jadi 600ms.
+        handler.postDelayed(ensureRotationRunnable, 600);
+    }
+
     public void startGlobalScreenCapture(MediaProjection mp) {
-        if (globalVirtualDisplay != null || mp == null) return;
-        Log.d(TAG, "startGlobalScreenCapture: initializing VirtualDisplay for Android 14+");
+        if (mp == null) return;
 
         DisplayMetrics metrics = getResources().getDisplayMetrics();
         int screenW = metrics.widthPixels;
         int screenH = metrics.heightPixels;
+        Log.d(TAG, "DEBUG-ORIENTATION: Checking capture config. Screen: " + screenW + "x" + screenH);
 
-        float designRatio = (float) savedWidth / savedHeight;
-        float screenRatio = (float) screenW / screenH;
+        // FIX LOGIC: Tentukan dimensi VirtualDisplay agar SELALU mengikuti orientasi fisik layar.
+        // Jika layar Landscape, buffer capture harus Landscape. Jika Portrait, buffer harus Portrait.
+        int maxDim = Math.max(savedWidth, savedHeight);
+        int minDim = Math.min(savedWidth, savedHeight);
 
-        if (screenRatio > designRatio) {
-            globalCapW = savedWidth;
-            globalCapH = Math.round(savedWidth / screenRatio);
+        int newCapW, newCapH;
+        if (screenW >= screenH) {
+            // HP sedang Landscape
+            newCapW = maxDim;
+            newCapH = minDim;
         } else {
-            globalCapH = savedHeight;
-            globalCapW = Math.round(savedHeight * screenRatio);
+            // HP sedang Portrait
+            newCapW = minDim;
+            newCapH = maxDim;
         }
 
-        globalScreenThread = new HandlerThread("GlobalScreenCap");
-        globalScreenThread.start();
-        Handler handler = new Handler(globalScreenThread.getLooper());
+        // Jika sudah ada dan resolusinya masih sama, tidak perlu buat ulang
+        if (globalVirtualDisplay != null && newCapW == globalCapW && newCapH == globalCapH) {
+            Log.d(TAG, "DEBUG-ORIENTATION: Skip reconfiguration, dimensions match: " + newCapW + "x" + newCapH);
+            return;
+        }
+
+        Log.d(TAG, "DEBUG-ORIENTATION: (RE)CONFIGURING VirtualDisplay to " + newCapW + "x" + newCapH);
+
+        // Cleanup old capture resources if any
+        if (globalVirtualDisplay != null) {
+            globalVirtualDisplay.release();
+            globalVirtualDisplay = null;
+        }
+        if (globalImageReader != null) {
+            globalImageReader.close();
+            globalImageReader = null;
+        }
+
+        globalCapW = newCapW;
+        globalCapH = newCapH;
+
+        if (globalScreenThread == null) {
+            globalScreenThread = new HandlerThread("GlobalScreenCap");
+            globalScreenThread.start();
+        }
+        Handler capHandler = new Handler(globalScreenThread.getLooper());
 
         globalImageReader = ImageReader.newInstance(globalCapW, globalCapH, PixelFormat.RGBA_8888, 2);
-        globalVirtualDisplay = mp.createVirtualDisplay("GlobalScreen",
-                globalCapW, globalCapH, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                globalImageReader.getSurface(), null, new Handler(Looper.getMainLooper()));
+        try {
+            globalVirtualDisplay = mp.createVirtualDisplay("GlobalScreen",
+                    globalCapW, globalCapH, metrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    globalImageReader.getSurface(), null, new Handler(Looper.getMainLooper()));
 
-        globalImageReader.setOnImageAvailableListener(reader -> {
-            try {
-                Image image = reader.acquireLatestImage();
-                if (image != null) {
-                    updateGlobalScreenBitmap(image);
-                    image.close();
-                }
-            } catch (Exception ignored) {}
-        }, handler);
+            globalImageReader.setOnImageAvailableListener(reader -> {
+                try {
+                    Image image = reader.acquireLatestImage();
+                    if (image != null) {
+                        updateGlobalScreenBitmap(image);
+                        image.close();
+                    }
+                } catch (Exception ignored) {}
+            }, capHandler);
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to create VirtualDisplay", e);
+        }
     }
 
     public void ensureGlobalScreenCapture() {
-        if (globalVirtualDisplay == null && savedMediaProjection != null) {
-            startGlobalScreenCapture(savedMediaProjection);
-        }
+        if (savedMediaProjection == null) return;
+        // FIX: dulu ini cuma jalan kalau globalVirtualDisplay == null, jadi kalau capture
+        // sempat kebentuk dengan orientasi SALAH (mis. race saat rotasi), dia tidak pernah
+        // dikoreksi lagi sampai stream dihentikan (VirtualDisplay-nya sudah "ada", cuma
+        // ukurannya salah). Sekarang selalu re-check; startGlobalScreenCapture() sendiri
+        // sudah punya guard "skip kalau dimensi sudah sama" jadi ini murah/no-op kalau
+        // memang belum ada perubahan orientasi.
+        startGlobalScreenCapture(savedMediaProjection);
     }
 
     private void updateGlobalScreenBitmap(Image image) {
@@ -470,6 +523,25 @@ public class StreamService extends Service implements ConnectChecker {
     public int getGlobalCapW() { return globalCapW; }
     public int getGlobalCapH() { return globalCapH; }
 
+    private final android.hardware.display.DisplayManager.DisplayListener displayListener = new android.hardware.display.DisplayManager.DisplayListener() {
+        @Override
+        public void onDisplayAdded(int displayId) {}
+        @Override
+        public void onDisplayRemoved(int displayId) {}
+        @Override
+        public void onDisplayChanged(int displayId) {
+            if (displayId == android.view.Display.DEFAULT_DISPLAY) {
+                // Deteksi rotasi. Ini trigger UTAMA & otomatis dari Android (DisplayManager),
+                // tidak butuh polling manual. 600ms debounce supaya tidak nangkap frame
+                // di tengah transisi rotasi (penyebab capture kebentuk "gepeng").
+                handler.removeCallbacks(ensureRotationRunnable);
+                handler.postDelayed(ensureRotationRunnable, 600);
+            }
+        }
+    };
+
+    private final Runnable ensureRotationRunnable = this::ensureGlobalScreenCapture;
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -478,7 +550,19 @@ public class StreamService extends Service implements ConnectChecker {
         rtmpStream = new RtmpStream(this, this);
         AudioLevelBus.registerListener(audioLevelListener);
         TikTokChatBus.getInstance().reset();
+
+        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        if (dm != null) dm.registerDisplayListener(displayListener, handler);
+
         bindKanaeService();
+        // Tidak perlu polling manual tiap 2 detik lagi. Android sudah otomatis kasih tau lewat
+        // 2 jalur berikut (keduanya sudah terdaftar / di-override di class ini):
+        //  1. DisplayManager.DisplayListener.onDisplayChanged() - trigger utama, langsung dari OS
+        //     saat rotasi/konfigurasi display berubah (didaftarkan di atas, beberapa baris ke atas).
+        //  2. Service#onConfigurationChanged() - backup, dipanggil OS ke semua komponen app saat
+        //     Configuration (termasuk orientasi) berubah.
+        // Keduanya sudah didebounce 600ms lalu manggil ensureGlobalScreenCapture(), yang sekarang
+        // juga sudah dibuat self-correcting (lihat komentar di ensureGlobalScreenCapture()).
     }
 
     private void acquireLocks() {
@@ -659,7 +743,7 @@ public class StreamService extends Service implements ConnectChecker {
             String scene = intent.getStringExtra(EXTRA_SCENE_TYPE);
             Uri uri = intent.getParcelableExtra(EXTRA_SCENE_URI);
             String sceneJson = intent.getStringExtra(EXTRA_SCENE_JSON);
-            
+
             if (!isAfkActive) {
                 lastSceneTypeBeforeAfk = scene;
                 lastSceneJsonBeforeAfk = sceneJson;
@@ -848,7 +932,7 @@ public class StreamService extends Service implements ConnectChecker {
                     if (bitmap == null && uri != null) {
                         bitmap = loadBitmapFromUri(uri, savedWidth, savedHeight);
                     }
-                    
+
                     if (bitmap != null) {
                         FakeSceneVideoSource source = new FakeSceneVideoSource(this, bitmap);
                         source.setResolution(savedWidth, savedHeight);
@@ -1349,6 +1433,7 @@ public class StreamService extends Service implements ConnectChecker {
         isStopping = true;
 
         handler.removeCallbacksAndMessages(null);
+        unbindKanaeService();
         try {
             if (rtmpStream != null && rtmpStream.isRecording()) {
                 rtmpStream.stopRecord();
@@ -1411,6 +1496,10 @@ public class StreamService extends Service implements ConnectChecker {
         instance = null;
         sceneSwitchExecutor.shutdownNow();
         AudioLevelBus.unregisterListener(audioLevelListener);
+
+        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        if (dm != null) dm.unregisterDisplayListener(displayListener);
+
         unbindKanaeService();
         TikTokChatBus.getInstance().reset();
         MusicBus.getInstance().reset();
@@ -1493,7 +1582,7 @@ public class StreamService extends Service implements ConnectChecker {
         try {
             // Monitor antrian data (cache) di stream client
             int itemsInCache = rtmpStream.getStreamClient().getItemsInCache();
-            
+
             // Threshold: 150 frame (~5 detik delay di 30fps)
             if (!isAfkActive && itemsInCache > 150) {
                 Log.w(TAG, "Network congestion detected! Cache=" + itemsInCache + ". Entering AFK Mode.");
@@ -1517,7 +1606,7 @@ public class StreamService extends Service implements ConnectChecker {
         // Note: kita butuh tau apa scene tipenya dan JSON-nya.
         // Untuk sederhana, kita asumsikan StreamService menyimpan state scene terakhir.
         // Kita gunakan snapshot scene yang sekarang sebagai background statis? Tidak, user mau XML.
-        
+
         Bitmap afkBitmap = renderAfkBitmap();
         if (afkBitmap != null) {
             // Ganti ke scene image statis (AFK)
@@ -1551,13 +1640,13 @@ public class StreamService extends Service implements ConnectChecker {
         try {
             LayoutInflater inflater = LayoutInflater.from(this);
             View view = inflater.inflate(R.layout.scene_afk, null);
-            
+
             // Set ukuran view sesuai resolusi streaming
             int width = savedWidth;
             int height = savedHeight;
-            
+
             view.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                        View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
+                    View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
             view.layout(0, 0, width, height);
 
             // Update info bitrate

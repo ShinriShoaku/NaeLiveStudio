@@ -242,14 +242,59 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         releaseGl();
     }
 
-    /** Gambar 1 bitmap frame screen-capture ke Canvas. Orientasi sudah ditangani secara global
-     *  lewat flipMatrix saat render Canvas ke GL, jadi tidak perlu flip manual di sini lagi. */
-    private static void drawScreenFrame(Canvas canvas, Bitmap frame, Rect dst, Paint paint) {
-        canvas.drawBitmap(frame, null, dst, paint);
-    }
-
+    /** Gambar 1 bitmap frame screen-capture ke Canvas. 
+     *  Menangani rotasi otomatis jika aspek rasio frame (misal portrait) beda jauh dengan 
+     *  aspek rasio target (misal landscape), agar tidak stretch. */
     private static void drawScreenFrame(Canvas canvas, Bitmap frame, RectF dst, Paint paint) {
-        canvas.drawBitmap(frame, null, dst, paint);
+        if (frame == null || frame.isRecycled()) return;
+
+        float frameW = frame.getWidth();
+        float frameH = frame.getHeight();
+        float dstW = dst.width();
+        float dstH = dst.height();
+
+        float frameAspect = frameW / frameH;
+        float dstAspect = dstW / dstH;
+
+        Log.d("Composite-GPU", "DEBUG-RENDER: Frame=" + frameW + "x" + frameH + " (asp=" + frameAspect + "), Dst=" + dstW + "x" + dstH + " (asp=" + dstAspect + ")");
+        
+        // Deteksi apakah frame 'sideways landscape' (portrait capture tapi isinya landscape)
+        // Biasanya terjadi saat HP portrait tapi app di dalamnya maksa landscape.
+        boolean isFramePortrait = frameAspect < 0.9f; 
+        boolean isDstLandscape = dstAspect > 1.1f;
+
+        if (isFramePortrait && isDstLandscape) {
+            // Kasus: HP Portrait tapi layer Landscape. Putar agar game tegak.
+            canvas.save();
+            canvas.rotate(-90, dst.centerX(), dst.centerY());
+            
+            float scale = Math.min(dstW / frameH, dstH / frameW);
+            float drawW = frameW * scale;
+            float drawH = frameH * scale;
+            
+            RectF drawRect = new RectF(
+                    dst.centerX() - drawW / 2f,
+                    dst.centerY() - drawH / 2f,
+                    dst.centerX() + drawW / 2f,
+                    dst.centerY() + drawH / 2f
+            );
+            canvas.drawBitmap(frame, null, drawRect, paint);
+            canvas.restore();
+        } else {
+            // Kasus: HP sudah Landscape (Android kirim landscape frame)
+            // ATAU orientasi frame dan target sudah searah. Cukup Fit-Center saja.
+            float scale = Math.min(dstW / frameW, dstH / frameH);
+            float drawW = frameW * scale;
+            float drawH = frameH * scale;
+            
+            RectF drawRect = new RectF(
+                    dst.centerX() - drawW / 2f,
+                    dst.centerY() - drawH / 2f,
+                    dst.centerX() + drawW / 2f,
+                    dst.centerY() + drawH / 2f
+            );
+            canvas.drawBitmap(frame, null, drawRect, paint);
+        }
     }
 
     private void drawAllLayers(Paint paint) {
@@ -263,7 +308,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
             // Draw Background Image/Screen if active (Z-index effectively -1)
             if (backgroundType == BackgroundType.IMAGE && backgroundImage != null) {
-                overlayCanvas.drawBitmap(backgroundImage, null, new Rect(0,0, designWidth, designHeight), paint);
+                overlayCanvas.drawBitmap(backgroundImage, null, new RectF(0,0, designWidth, designHeight), paint);
                 hasPendingOverlays = true;
             } else if (backgroundType == BackgroundType.SCREEN) {
                 StreamService svc = StreamService.getInstance();
@@ -271,7 +316,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                     synchronized (svc.getGlobalScreenLock()) {
                         Bitmap bg = svc.getGlobalScreenFrame();
                         if (bg != null && !bg.isRecycled()) {
-                            drawScreenFrame(overlayCanvas, bg, new Rect(0,0, designWidth, designHeight), paint);
+                            drawScreenFrame(overlayCanvas, bg, new RectF(0,0, designWidth, designHeight), paint);
                             hasPendingOverlays = true;
                         }
                     }
