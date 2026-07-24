@@ -54,6 +54,11 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         public final RectF reusableDst = new RectF();
         public android.graphics.ColorMatrix reusableColorMatrix;
         public android.graphics.ColorMatrixColorFilter reusableColorFilter;
+        // OPTIMASI: brightness terakhir yang dipakai buat reusableColorFilter, supaya
+        // ColorMatrixColorFilter tidak di-`new` ulang tiap frame (30x/detik) kalau mic level
+        // sedang stabil/diam - ColorMatrixColorFilter di Android immutable begitu dibuat,
+        // jadi cuma perlu re-create kalau brightness-nya benar2 berubah signifikan.
+        public float lastAppliedBrightness = Float.NaN;
 
         public Layer(Bitmap bitmap, String uri, LayerType type, float x, float y, float w, float h, int zIndex) {
             this.bitmap = bitmap;
@@ -72,6 +77,15 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     private final Bitmap backgroundImage;
     private final Uri backgroundVideoUri;
     private final List<Layer> layers;
+
+    // FIX BUG: background IMAGE dulu digambar dengan src=null (drawBitmap(bmp, null, dstFullCanvas))
+    // yang artinya seluruh bitmap sumber dipaksa masuk ke dst apa adanya -> kalau aspect ratio
+    // gambar beda dari aspect ratio resolusi custom (designWidth x designHeight), hasilnya
+    // stretch/gepeng, bukan center-crop kayak background OBS pada umumnya. Rect ini dihitung
+    // SEKALI di constructor (backgroundImage & designWidth/Height sudah final utk objek ini) berupa
+    // area di DALAM bitmap sumber yang di-crop tengah supaya aspect ratio-nya pas dengan target,
+    // baru itu yang digambar full ke dst (lihat drawAllLayers()).
+    private final Rect backgroundImageCropRect;
 
     public enum BackgroundType { COLOR, IMAGE, VIDEO, SCREEN }
 
@@ -94,12 +108,63 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
     private int oesProgram, rgbaProgram;
     private int overlayTextureId = 0;
+    // FIX PERFORMA BESAR: background BackgroundType.SCREEN (rekam layar) dulu digambar lewat
+    // Canvas 2D (software, CPU) - lihat catatan panjang di computeRequiresDynamicOverlayRedraw()
+    // dan drawAllLayers(). Sekarang screen capture punya texture GL sendiri, di-upload &
+    // digambar langsung di GPU (persis seperti video background), BUKAN lewat overlayBuffer lagi.
+    private int screenTextureId = 0;
     private final java.util.Map<VideoTextureDecoder, Integer> decoderTextures = new java.util.HashMap<>();
     private Bitmap overlayBuffer;
     private Canvas overlayCanvas;
     private final Object overlayLock = new Object();
-    private boolean overlayDirty = true;
-    private final Rect scratchSrcRect = new Rect();
+
+    // ==== OPTIMASI: skip re-render + re-upload overlay texture kalau scene statis ====
+    // Sebelumnya overlayBuffer (bitmap se-resolusi design, misal 1080x1920) di-erase, digambar
+    // ulang total, lalu di-upload ke GPU lewat GLUtils.texImage2D di SETIAP frame (30x/detik),
+    // walaupun kontennya tidak berubah sama sekali (misal cuma 1 layer gambar statis). Upload
+    // CPU->GPU sebesar itu tiap frame mahal, apalagi di device low-end.
+    //
+    // `layers` (dan backgroundType/backgroundImage) sudah final utk sepanjang umur objek ini -
+    // tiap ganti scene, StreamService bikin CompositeSceneVideoSource baru (lihat
+    // StreamService.applyCompositeScene), bukan mutasi layer list yang sudah jalan. Jadi aman
+    // dihitung SEKALI di constructor:
+    //  - overlayHasAnyContent : apa ada sesuatu utk digambar ke overlay sama sekali.
+    //  - requiresDynamicOverlayRedraw : apa isi overlay Canvas bisa berubah antar-frame (chat/
+    //    gift/join TikTok, lagu berjalan, partikel efek, voice-anim yang bereaksi ke mic, atau
+    //    layer PiP screen-share). Background SCREEN (rekam layar penuh) TIDAK dihitung di sini lagi
+    //    karena sekarang digambar langsung sbg texture GPU terpisah (lihat runDrawLoop()), bukan
+    //    lewat overlayBuffer. Kalau TIDAK ada satupun tipe layer dinamis ini, overlay-nya statis ->
+    //    cukup di-render & di-upload SEKALI saja pas frame pertama, frame selanjutnya tinggal
+    //    gambar ulang texture yang sudah ada di GPU (murah, tanpa sentuh Canvas/CPU dan tanpa
+    //    texImage2D lagi).
+    private final boolean overlayHasAnyContent;
+    private final boolean requiresDynamicOverlayRedraw;
+    private volatile boolean overlayNeedsInitialRender = true;
+
+    private static boolean computeRequiresDynamicOverlayRedraw(BackgroundType backgroundType, List<Layer> layers) {
+        // CATATAN: BackgroundType.SCREEN (rekam layar sbg background) TIDAK lagi bikin fungsi ini
+        // return true - screen capture sekarang digambar langsung sbg texture GPU terpisah di
+        // runDrawLoop() (selalu di-refresh tiap frame di jalur itu sendiri, terlepas dari flag
+        // ini), bukan lewat overlayBuffer/Canvas lagi. Jadi kalau scene screen-record TIDAK
+        // punya layer dinamis lain (chat/gift/dst di bawah), overlay Canvas-nya sungguhan statis
+        // dan boleh di-skip render+upload-nya tiap frame.
+        for (Layer l : layers) {
+            switch (l.type) {
+                case EFFECT:        // partikel beranimasi tiap frame
+                case TIKTOK_CHAT:
+                case TIKTOK_GIFT:
+                case TIKTOK_JOIN:
+                case MUSIC_CURRENT:
+                case MUSIC_QUEUE:
+                case SCREEN:        // layer screen-share sbg elemen overlay (mis. PiP kecil), beda dari BackgroundType.SCREEN di atas - ini masih lewat Canvas jadi tetap dianggap dinamis
+                case VOICE_ANIM:    // bereaksi ke level mic yang berubah tiap saat
+                    return true;
+                default:
+                    break;
+            }
+        }
+        return false;
+    }
 
     // FIX "posisi kebalik" pas scene Layar HP (SCREEN): frame mentah dari StreamService berasal
     // langsung dari ImageReader (VirtualDisplay hasil MediaProjection, lihat
@@ -116,6 +181,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     private static final boolean FLIP_SCREEN_CAPTURE_VERTICALLY = true;
 
     private FloatBuffer vertexBuffer, texCoordBuffer;
+    private FloatBuffer screenVertexBuffer; // Buffer khusus untuk Fit-Center screen
     private final float[] identityMatrix = new float[16];
     private final float[] flipMatrix = new float[16];
     {
@@ -126,16 +192,6 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         // akan terbalik vertikal (atas-bawah ketukar).
         android.opengl.Matrix.scaleM(flipMatrix, 0, 1f, -1f, 1f);
     }
-
-    // OPTIMASI: dulu di-allocate baru tiap frame di drawAllLayers()/drawScreenFrame() (30-60x/detik
-    // selama live berjam-jam -> GC churn & potensi micro-stutter). Draw loop cuma jalan di 1 thread
-    // (Composite-GPU-Thread), jadi aman dipakai sebagai scratch/reusable object di sini.
-    private final RectF scratchFullCanvasRect = new RectF();
-    private final RectF scratchScreenDrawRect = new RectF();
-
-    // OPTIMASI: DEBUG-RENDER dulu di-log SETIAP frame (30-60x/detik) dgn string concat tiap
-    // panggilan -> overhead CPU sia-sia di production build. Sekarang di-throttle max 1x/detik.
-    private long lastRenderLogNs = 0L;
 
     public CompositeSceneVideoSource(Context context, BackgroundType backgroundType,
                                      Bitmap backgroundImage, Uri backgroundVideoUri,
@@ -148,8 +204,38 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         this.layers = new CopyOnWriteArrayList<>(layers);
         this.designWidth = width;
         this.designHeight = height;
+        this.overlayHasAnyContent = (backgroundType == BackgroundType.IMAGE && backgroundImage != null)
+                || !this.layers.isEmpty();
+        this.requiresDynamicOverlayRedraw = computeRequiresDynamicOverlayRedraw(backgroundType, this.layers);
+        this.backgroundImageCropRect = (backgroundType == BackgroundType.IMAGE && backgroundImage != null)
+                ? computeCenterCropSrcRect(backgroundImage.getWidth(), backgroundImage.getHeight(), width, height)
+                : null;
         setWidth(width);
         setHeight(height);
+    }
+
+    /** Hitung area crop-tengah (mirip ScaleType.CENTER_CROP) di dalam bitmap sumber berukuran
+     *  srcW x srcH, supaya kalau digambar full ke area dstW x dstH, aspect ratio-nya pas tanpa
+     *  gepeng/stretch dan tanpa letterbox - kelebihan sisi yang tidak muat dipotong simetris. */
+    private static Rect computeCenterCropSrcRect(int srcW, int srcH, int dstW, int dstH) {
+        if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return new Rect(0, 0, srcW, srcH);
+        float srcAspect = (float) srcW / srcH;
+        float dstAspect = (float) dstW / dstH;
+        int cropW, cropH, left, top;
+        if (srcAspect > dstAspect) {
+            // Sumber lebih "lebar" dari target -> crop kiri-kanan, tinggi dipakai penuh.
+            cropH = srcH;
+            cropW = Math.max(1, Math.round(srcH * dstAspect));
+            left = (srcW - cropW) / 2;
+            top = 0;
+        } else {
+            // Sumber lebih "tinggi"/kotak dari target -> crop atas-bawah, lebar dipakai penuh.
+            cropW = srcW;
+            cropH = Math.max(1, Math.round(srcW / dstAspect));
+            left = 0;
+            top = (srcH - cropH) / 2;
+        }
+        return new Rect(left, top, left + cropW, top + cropH);
     }
 
     public void setMicLevel(float level) { this.micLevel = level; }
@@ -207,6 +293,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         synchronized (overlayLock) {
             if (overlayBuffer != null) { overlayBuffer.recycle(); overlayBuffer = null; }
         }
+        overlayNeedsInitialRender = true;
     }
 
     @Override
@@ -241,10 +328,51 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                 int texId = getDecoderTexture(videoBgDecoder);
                 videoBgDecoder.updateTexImage();
                 drawTexture(oesProgram, texId, videoBgDecoder.getTexMatrix(), true);
+            } else if (backgroundType == BackgroundType.SCREEN) {
+                // FIX PERFORMA: dulu screen-capture di-composite lewat Canvas 2D (CPU) ke dalam
+                // overlayBuffer bareng semua layer lain, lalu SELURUH overlayBuffer di-upload
+                // sebagai 1 texture RGBA - itu artinya tiap frame ada 2 operasi CPU berat:
+                // (a) canvas.drawBitmap() men-scale bitmap screen capture secara software ke
+                //     ukuran designWidth x designHeight (resample CPU, mahal utk bitmap besar),
+                // (b) GLUtils.texImage2D() upload ULANG seluruh bitmap besar itu tiap frame.
+                // Ini yang bikin frame rate aktual jatuh jauh di bawah target (misal target 30fps
+                // tapi cuma dapat ~5fps) - loop render jadi lebih lambat dari frameIntervalNs
+                // karena kerja CPU per frame kelamaan, padahal encoder tetap nunggu di target 30fps
+                // sehingga keyframe interval yang harusnya 2 detik jadi molor berkali-kali lipat.
+                //
+                // Sekarang screen-capture bitmap di-upload ke texture GL SENDIRI (tanpa lewat
+                // Canvas sama sekali) dan di-scale ke layar penuh oleh GPU lewat quad/shader biasa
+                // (drawTexture) - jauh lebih murah daripada resample software. overlayBuffer
+                // sekarang cuma isi layer TAMBAHAN (chat/gambar/dll), bukan screen capture-nya.
+                StreamService svc = StreamService.getInstance();
+                if (svc != null) {
+                    synchronized (svc.getGlobalScreenLock()) {
+                        Bitmap bg = svc.getGlobalScreenFrame();
+                        if (bg != null && !bg.isRecycled()) {
+                            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, screenTextureId);
+                            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bg, 0);
+
+                            // FIX STRETCH: Hitung vertices agar fit-center
+                            updateScreenVertices(bg.getWidth(), bg.getHeight(), designWidth, designHeight);
+                            drawTextureWithBuffer(rgbaProgram, screenTextureId, flipMatrix, false, screenVertexBuffer);
+                        }
+                    }
+                }
             }
 
             // 2. Draw Other Backgrounds and Layers in Z-order
-            drawAllLayers(paint);
+            if (overlayHasAnyContent) {
+                if (requiresDynamicOverlayRedraw || overlayNeedsInitialRender) {
+                    drawAllLayers(paint);
+                    overlayNeedsInitialRender = false;
+                } else {
+                    // OPTIMASI: scene ini statis (tidak ada layer chat/gift/join/music/effect/
+                    // voice-anim/screen) - texture overlay yang sudah di-upload di frame pertama
+                    // masih valid, jadi tinggal digambar ulang tanpa sentuh Canvas CPU maupun
+                    // texImage2D lagi.
+                    redrawCachedOverlayTexture();
+                }
+            }
 
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);
 
@@ -254,64 +382,28 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         releaseGl();
     }
 
-    /** Gambar 1 bitmap frame screen-capture ke Canvas.
-     *  Menangani rotasi otomatis jika aspek rasio frame (misal portrait) beda jauh dengan
-     *  aspek rasio target (misal landscape), agar tidak stretch. */
-    private void drawScreenFrame(Canvas canvas, Bitmap frame, RectF dst, Paint paint) {
+    /** Gambar 1 bitmap frame screen-capture ke Canvas dengan Fit-Center (jaga aspect ratio).
+     *  Orientasi sudah ditangani secara global lewat flipMatrix saat render Canvas ke GL. */
+    private static void drawScreenFrame(Canvas canvas, Bitmap frame, RectF dst, Paint paint) {
         if (frame == null || frame.isRecycled()) return;
-
-        float frameW = frame.getWidth();
-        float frameH = frame.getHeight();
-        float dstW = dst.width();
-        float dstH = dst.height();
-
-        float frameAspect = frameW / frameH;
-        float dstAspect = dstW / dstH;
-
-        long now = System.nanoTime();
-        if (now - lastRenderLogNs > 1_000_000_000L) { // max 1x/detik, bukan tiap frame
-            lastRenderLogNs = now;
-           // Log.d("Composite-GPU", "DEBUG-RENDER: Frame=" + frameW + "x" + frameH + " (asp=" + frameAspect + "), Dst=" + dstW + "x" + dstH + " (asp=" + dstAspect + ")");
-        }
-
-        // Deteksi apakah frame 'sideways landscape' (portrait capture tapi isinya landscape)
-        // Biasanya terjadi saat HP portrait tapi app di dalamnya maksa landscape.
-        boolean isFramePortrait = frameAspect < 0.9f;
-        boolean isDstLandscape = dstAspect > 1.1f;
-
-        RectF drawRect = scratchScreenDrawRect;
-        if (isFramePortrait && isDstLandscape) {
-            // Kasus: HP Portrait tapi layer Landscape. Putar agar game tegak.
-            canvas.save();
-            canvas.rotate(-90, dst.centerX(), dst.centerY());
-
-            float scale = Math.min(dstW / frameH, dstH / frameW);
-            float drawW = frameW * scale;
-            float drawH = frameH * scale;
-
-            drawRect.set(
-                    dst.centerX() - drawW / 2f,
-                    dst.centerY() - drawH / 2f,
-                    dst.centerX() + drawW / 2f,
-                    dst.centerY() + drawH / 2f
-            );
-            canvas.drawBitmap(frame, null, drawRect, paint);
-            canvas.restore();
+        
+        float srcAspect = (float) frame.getWidth() / frame.getHeight();
+        float dstAspect = dst.width() / dst.height();
+        
+        RectF finalDst = new RectF(dst);
+        if (srcAspect > dstAspect) {
+            // Bitmap lebih lebar -> paskan lebar, tinggi dikurangi (bar hitam atas-bawah)
+            float newHeight = dst.width() / srcAspect;
+            float dy = (dst.height() - newHeight) / 2f;
+            finalDst.set(dst.left, dst.top + dy, dst.right, dst.bottom - dy);
         } else {
-            // Kasus: HP sudah Landscape (Android kirim landscape frame)
-            // ATAU orientasi frame dan target sudah searah. Cukup Fit-Center saja.
-            float scale = Math.min(dstW / frameW, dstH / frameH);
-            float drawW = frameW * scale;
-            float drawH = frameH * scale;
-
-            drawRect.set(
-                    dst.centerX() - drawW / 2f,
-                    dst.centerY() - drawH / 2f,
-                    dst.centerX() + drawW / 2f,
-                    dst.centerY() + drawH / 2f
-            );
-            canvas.drawBitmap(frame, null, drawRect, paint);
+            // Bitmap lebih tinggi -> paskan tinggi, lebar dikurangi (bar hitam kiri-kanan)
+            float newWidth = dst.height() * srcAspect;
+            float dx = (dst.width() - newWidth) / 2f;
+            finalDst.set(dst.left + dx, dst.top, dst.right - dx, dst.bottom);
         }
+        
+        canvas.drawBitmap(frame, null, finalDst, paint);
     }
 
     private void drawAllLayers(Paint paint) {
@@ -319,60 +411,17 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             if (overlayBuffer == null) {
                 overlayBuffer = Bitmap.createBitmap(designWidth, designHeight, Bitmap.Config.ARGB_8888);
                 overlayCanvas = new Canvas(overlayBuffer);
-                overlayDirty = true;
             }
-
-            // Check if any source is dirty to trigger a re-render of the overlay buffer
-            checkSourcesDirty();
-
-            if (!overlayDirty) {
-                // If not dirty, we still need to draw the cached overlay texture
-                GLES20.glEnable(GLES20.GL_BLEND);
-                GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
-                drawTexture(rgbaProgram, overlayTextureId, flipMatrix, false);
-                GLES20.glDisable(GLES20.GL_BLEND);
-                return;
-            }
-
             overlayBuffer.eraseColor(Color.TRANSPARENT);
             boolean hasPendingOverlays = false;
 
-            // Draw Background Image/Screen if active (Z-index effectively -1)
+            // Draw Background Image if active (Z-index effectively -1). Background SCREEN sudah
+            // digambar terpisah langsung di GPU (lihat runDrawLoop()), jadi tidak lagi lewat sini.
             if (backgroundType == BackgroundType.IMAGE && backgroundImage != null) {
-                scratchFullCanvasRect.set(0, 0, designWidth, designHeight);
-                
-                // Manual Center-Crop calculation for background image
-                float imgW = backgroundImage.getWidth();
-                float imgH = backgroundImage.getHeight();
-                float imgAspect = imgW / imgH;
-                float canvasAspect = (float) designWidth / designHeight;
-                
-                if (imgAspect > canvasAspect) {
-                    // Image wider than canvas
-                    int cropW = (int) (imgH * canvasAspect);
-                    int offset = (int) ((imgW - cropW) / 2);
-                    scratchSrcRect.set(offset, 0, offset + cropW, (int) imgH);
-                } else {
-                    // Image taller than canvas
-                    int cropH = (int) (imgW / canvasAspect);
-                    int offset = (int) ((imgH - cropH) / 2);
-                    scratchSrcRect.set(0, offset, (int) imgW, offset + cropH);
-                }
-                
-                overlayCanvas.drawBitmap(backgroundImage, scratchSrcRect, scratchFullCanvasRect, paint);
+                // FIX: dulu src=null (seluruh bitmap dipaksa masuk dst) -> stretch/gepeng kalau
+                // aspect ratio beda. Sekarang pakai backgroundImageCropRect (center-crop).
+                overlayCanvas.drawBitmap(backgroundImage, backgroundImageCropRect, new Rect(0,0, designWidth, designHeight), paint);
                 hasPendingOverlays = true;
-            } else if (backgroundType == BackgroundType.SCREEN) {
-                StreamService svc = StreamService.getInstance();
-                if (svc != null) {
-                    synchronized (svc.getGlobalScreenLock()) {
-                        Bitmap bg = svc.getGlobalScreenFrame();
-                        if (bg != null && !bg.isRecycled()) {
-                            scratchFullCanvasRect.set(0, 0, designWidth, designHeight);
-                            drawScreenFrame(overlayCanvas, bg, scratchFullCanvasRect, paint);
-                            hasPendingOverlays = true;
-                        }
-                    }
-                }
             }
 
             for (Layer layer : layers) {
@@ -385,60 +434,16 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             if (hasPendingOverlays) {
                 flushOverlayCanvas();
             }
-            overlayDirty = false;
         }
     }
 
-    private void checkSourcesDirty() {
-        // Particles and Voice Anim are always considered dirty because they animate/react every frame
-        for (Layer layer : layers) {
-            if (layer.type == LayerType.EFFECT || layer.type == LayerType.VOICE_ANIM) {
-                overlayDirty = true;
-                return;
-            }
-            if (layer.type == LayerType.MUSIC_CURRENT && MusicBus.getInstance().isCurrentSongActive()) {
-                overlayDirty = true; // Music info rotates every frame
-                return;
-            }
-        }
-
-        if (backgroundType == BackgroundType.SCREEN) {
-            StreamService svc = StreamService.getInstance();
-            if (svc != null && svc.isGlobalScreenDirty()) {
-                overlayDirty = true;
-                svc.clearGlobalScreenDirty();
-            }
-        }
-
-        TikTokChatBus chatBus = TikTokChatBus.getInstance();
-        if (chatBus.isChatDirty()) {
-            overlayDirty = true;
-            // chatDirty is cleared inside renderChatOverlay
-        }
-        if (chatBus.isGiftDirty()) {
-            overlayDirty = true;
-            chatBus.clearGiftDirty();
-        }
-        if (chatBus.isJoinDirty()) {
-            overlayDirty = true;
-            chatBus.clearJoinDirty();
-        }
-
-        MusicBus musicBus = MusicBus.getInstance();
-        if (musicBus.isQueueDirty()) {
-            overlayDirty = true;
-            musicBus.clearQueueDirty();
-        }
-
-        for (Layer layer : layers) {
-            if (layer.type == LayerType.SCREEN) {
-                StreamService svc = StreamService.getInstance();
-                if (svc != null && svc.isGlobalScreenDirty()) {
-                    overlayDirty = true;
-                    svc.clearGlobalScreenDirty();
-                }
-            }
-        }
+    /** Gambar ulang overlay texture yang SUDAH ter-upload ke GPU, tanpa render Canvas ulang
+     *  maupun texImage2D lagi. Dipakai utk scene statis (lihat requiresDynamicOverlayRedraw). */
+    private void redrawCachedOverlayTexture() {
+        GLES20.glEnable(GLES20.GL_BLEND);
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+        drawTexture(rgbaProgram, overlayTextureId, flipMatrix, false);
+        GLES20.glDisable(GLES20.GL_BLEND);
     }
 
     private void flushOverlayCanvas() {
@@ -539,9 +544,18 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                 float norm = Math.max(0.0f, Math.min(1.0f, (level - tStart) / range));
 
                 float brightness = minB + (norm * (1.0f - minB));
-                if (layer.reusableColorMatrix == null) layer.reusableColorMatrix = new android.graphics.ColorMatrix();
-                layer.reusableColorMatrix.setScale(brightness, brightness, brightness, 1f);
-                layer.reusableColorFilter = new android.graphics.ColorMatrixColorFilter(layer.reusableColorMatrix);
+                // OPTIMASI: ColorMatrixColorFilter di Android immutable begitu dibuat (matrix-nya
+                // di-snapshot saat construction), jadi sebelumnya kode ini selalu bikin objek baru
+                // tiap frame (30x/detik) walau brightness-nya nyaris sama -> GC churn terus-terusan
+                // selama layer VOICE_ANIM aktif. Sekarang cuma re-create kalau brightness berubah
+                // > 0.5% dari nilai terakhir, sisanya reuse filter yang sudah ada.
+                if (layer.reusableColorFilter == null || Float.isNaN(layer.lastAppliedBrightness)
+                        || Math.abs(layer.lastAppliedBrightness - brightness) > 0.005f) {
+                    if (layer.reusableColorMatrix == null) layer.reusableColorMatrix = new android.graphics.ColorMatrix();
+                    layer.reusableColorMatrix.setScale(brightness, brightness, brightness, 1f);
+                    layer.reusableColorFilter = new android.graphics.ColorMatrixColorFilter(layer.reusableColorMatrix);
+                    layer.lastAppliedBrightness = brightness;
+                }
                 paint.setColorFilter(layer.reusableColorFilter);
 
                 float scale = (1.0f - (sInt / 2.0f)) + (norm * sInt);
@@ -569,6 +583,13 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
         GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
 
+        int[] screenTex = new int[1];
+        GLES20.glGenTextures(1, screenTex, 0);
+        screenTextureId = screenTex[0];
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, screenTextureId);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+
         vertexBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
         vertexBuffer.put(new float[]{-1, -1, 1, -1, -1, 1, 1, 1}).position(0);
         texCoordBuffer = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
@@ -576,13 +597,18 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     }
 
     private void drawTexture(int program, int texId, float[] matrix, boolean isOes) {
+        drawTextureWithBuffer(program, texId, matrix, isOes, vertexBuffer);
+    }
+
+    private void drawTextureWithBuffer(int program, int texId, float[] matrix, boolean isOes, FloatBuffer vBuffer) {
+        if (vBuffer == null) vBuffer = vertexBuffer;
         GLES20.glUseProgram(program);
         int posLoc = GLES20.glGetAttribLocation(program, "aPosition");
         int texLoc = GLES20.glGetAttribLocation(program, "aTexCoord");
         int mtxLoc = GLES20.glGetUniformLocation(program, "uMatrix");
 
         GLES20.glEnableVertexAttribArray(posLoc);
-        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer);
+        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, vBuffer);
         GLES20.glEnableVertexAttribArray(texLoc);
         GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
         GLES20.glUniformMatrix4fv(mtxLoc, 1, false, matrix, 0);
@@ -592,20 +618,83 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
     }
 
+    private int lastSrcW = -1, lastSrcH = -1;
+
+    private void updateScreenVertices(int srcW, int srcH, int dstW, int dstH) {
+        if (srcW == lastSrcW && srcH == lastSrcH && screenVertexBuffer != null) return;
+        lastSrcW = srcW; lastSrcH = srcH;
+
+        float srcAspect = (float) srcW / srcH;
+        float dstAspect = (float) dstW / dstH;
+
+        float x = 1.0f, y = 1.0f;
+        if (srcAspect > dstAspect) {
+            y = dstAspect / srcAspect;
+        } else {
+            x = srcAspect / dstAspect;
+        }
+
+        float[] vdata = {
+                -x, -y,
+                 x, -y,
+                -x,  y,
+                 x,  y
+        };
+
+        if (screenVertexBuffer == null) {
+            screenVertexBuffer = ByteBuffer.allocateDirect(vdata.length * 4)
+                    .order(ByteOrder.nativeOrder()).asFloatBuffer();
+        }
+        screenVertexBuffer.clear();
+        screenVertexBuffer.put(vdata).position(0);
+    }
+
     private void setupEgl() {
+        // FIX: sebelumnya tidak ada pengecekan error sama sekali di sini - kalau salah satu
+        // langkah EGL gagal di device/driver tertentu, kode lanjut jalan dengan EGL_NO_DISPLAY /
+        // EGL_NO_CONTEXT / config kosong dan baru meledak (atau nge-black-screen tanpa pesan
+        // jelas) di panggilan GLES berikutnya - susah didiagnosis. Sekarang tiap langkah dicek dan
+        // di-log pakai eglGetError() kalau gagal, lalu berhenti sebelum bikin state GL rusak.
         eglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY) {
+            Log.e(TAG, "setupEgl: eglGetDisplay gagal (EGL_NO_DISPLAY)");
+            return;
+        }
+
         int[] ver = new int[2];
-        EGL14.eglInitialize(eglDisplay, ver, 0, ver, 1);
+        if (!EGL14.eglInitialize(eglDisplay, ver, 0, ver, 1)) {
+            Log.e(TAG, "setupEgl: eglInitialize gagal, error=0x" + Integer.toHexString(EGL14.eglGetError()));
+            eglDisplay = EGL14.EGL_NO_DISPLAY;
+            return;
+        }
+
         int[] attr = { EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8, EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
                 EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT, EGL14.EGL_NONE };
         EGLConfig[] configs = new EGLConfig[1];
         int[] num = new int[1];
-        EGL14.eglChooseConfig(eglDisplay, attr, 0, configs, 0, 1, num, 0);
+        if (!EGL14.eglChooseConfig(eglDisplay, attr, 0, configs, 0, 1, num, 0) || num[0] <= 0) {
+            Log.e(TAG, "setupEgl: eglChooseConfig gagal / tidak ada config RGBA8888 ES2 yang cocok, error=0x"
+                    + Integer.toHexString(EGL14.eglGetError()));
+            return;
+        }
+
         int[] ctxAttr = { EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE };
         eglContext = EGL14.eglCreateContext(eglDisplay, configs[0], EGL14.EGL_NO_CONTEXT, ctxAttr, 0);
+        if (eglContext == EGL14.EGL_NO_CONTEXT) {
+            Log.e(TAG, "setupEgl: eglCreateContext gagal, error=0x" + Integer.toHexString(EGL14.eglGetError()));
+            return;
+        }
+
         int[] surfAttr = { EGL14.EGL_NONE };
         eglSurface = EGL14.eglCreateWindowSurface(eglDisplay, configs[0], targetSurface, surfAttr, 0);
-        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext);
+        if (eglSurface == EGL14.EGL_NO_SURFACE) {
+            Log.e(TAG, "setupEgl: eglCreateWindowSurface gagal, error=0x" + Integer.toHexString(EGL14.eglGetError()));
+            return;
+        }
+
+        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+            Log.e(TAG, "setupEgl: eglMakeCurrent gagal, error=0x" + Integer.toHexString(EGL14.eglGetError()));
+        }
     }
 
     private void releaseGl() {

@@ -66,8 +66,8 @@ public class TikTokChatBus {
     private final Deque<ChatEntry> chatLines = new ArrayDeque<>();
     private final Object chatLock = new Object();
     private volatile boolean chatDirty = true;
-    private volatile boolean giftDirty = false;
-    private volatile boolean joinDirty = false;
+    private final Object giftLock = new Object();
+    private final Object joinLock = new Object();
 
     private volatile String lastGiftUser;
     private volatile String lastGiftName;
@@ -86,14 +86,32 @@ public class TikTokChatBus {
     private volatile String connectedUsername;
 
     // Cache bitmap chat supaya tidak re-draw canvas kalau isinya belum berubah (dipanggil ~30x/detik).
-    private Bitmap cachedChatBitmap;
+    //
+    // FIX RACE CONDITION: sebelumnya cuma ada 1 bitmap per overlay (misal cachedChatBitmap).
+    // renderXOverlay() dipanggil dari render thread (Composite-GPU-Thread), yang men-trigger
+    // eraseColor() lalu Handler.post() ke MAIN thread untuk benar2 menggambar (LayoutInflater/View
+    // wajib di UI thread) - lalu method langsung return referensi bitmap yang SAMA itu ke pemanggil
+    // TANPA menunggu Runnable di main thread selesai. Render thread lalu langsung meng-upload
+    // bitmap itu ke GPU texture (GLUtils.texImage2D) di frame yang sama. Karena tidak ada
+    // sinkronisasi antara "main thread menggambar ke bitmap X" dan "render thread membaca pixel
+    // bitmap X", hasilnya bisa berupa frame kosong/transparan (abis eraseColor, belum digambar) atau
+    // konten tergores (partial draw) yang ke-capture ke output stream -> flicker teks chat/gift/join.
+    //
+    // Sekarang pakai double-buffer: main thread SELALU menggambar ke buffer belakang ("back"),
+    // dan index "front" (yang dibaca render thread) baru di-swap setelah gambar selesai, di dalam
+    // synchronized block yang sama dipakai render thread utk membaca. Render thread jadi selalu
+    // dapat bitmap yang lengkap - kalaupun agak "telat" 1 frame, tidak pernah setengah-gambar.
+    private final Bitmap[] chatBitmaps = new Bitmap[2];
+    private int chatFrontIndex = 0;
     private int cachedChatW = -1, cachedChatH = -1;
 
-    private Bitmap cachedGiftBitmap;
+    private final Bitmap[] giftBitmaps = new Bitmap[2];
+    private int giftFrontIndex = 0;
     private int cachedGiftW = -1, cachedGiftH = -1;
     private long lastGiftRenderedTs = -1;
 
-    private Bitmap cachedJoinBitmap;
+    private final Bitmap[] joinBitmaps = new Bitmap[2];
+    private int joinFrontIndex = 0;
     private int cachedJoinW = -1, cachedJoinH = -1;
     private long lastJoinRenderedTs = -1;
 
@@ -115,7 +133,6 @@ public class TikTokChatBus {
         lastGiftUrl = giftUrl;
         lastGiftCount = count;
         lastGiftTimestamp = System.currentTimeMillis();
-        giftDirty = true;
         preloadImage(giftUrl);
     }
 
@@ -123,7 +140,6 @@ public class TikTokChatBus {
         lastJoinUser = user;
         lastJoinProfileUrl = profileUrl;
         lastJoinTimestamp = System.currentTimeMillis();
-        joinDirty = true;
         preloadImage(profileUrl);
     }
 
@@ -171,38 +187,42 @@ public class TikTokChatBus {
     public boolean isConnected() { return connected; }
     public String getConnectedUsername() { return connectedUsername; }
 
-    public boolean isChatDirty() { return chatDirty; }
-    public boolean isGiftDirty() { return giftDirty; }
-    public boolean isJoinDirty() { return joinDirty; }
-
-    public void clearGiftDirty() { giftDirty = false; }
-    public void clearJoinDirty() { joinDirty = false; }
-
     /** Panggil saat live/record dimulai atau dihentikan supaya overlay tidak nyisa data sesi lama. */
     public void reset() {
         synchronized (chatLock) {
             chatLines.clear();
             chatDirty = true;
-            if (cachedChatBitmap != null) {
-                cachedChatBitmap.recycle();
-                cachedChatBitmap = null;
+            for (int i = 0; i < chatBitmaps.length; i++) {
+                if (chatBitmaps[i] != null && !chatBitmaps[i].isRecycled()) chatBitmaps[i].recycle();
+                chatBitmaps[i] = null;
             }
+            cachedChatW = -1;
+            cachedChatH = -1;
+            chatFrontIndex = 0;
         }
-        lastGiftUser = null;
-        lastGiftTimestamp = 0L;
-        lastGiftRenderedTs = -1;
-        giftDirty = true;
-        if (cachedGiftBitmap != null) {
-            cachedGiftBitmap.recycle();
-            cachedGiftBitmap = null;
+        synchronized (giftLock) {
+            lastGiftUser = null;
+            lastGiftTimestamp = 0L;
+            lastGiftRenderedTs = -1;
+            for (int i = 0; i < giftBitmaps.length; i++) {
+                if (giftBitmaps[i] != null && !giftBitmaps[i].isRecycled()) giftBitmaps[i].recycle();
+                giftBitmaps[i] = null;
+            }
+            cachedGiftW = -1;
+            cachedGiftH = -1;
+            giftFrontIndex = 0;
         }
-        lastJoinUser = null;
-        lastJoinTimestamp = 0L;
-        lastJoinRenderedTs = -1;
-        joinDirty = true;
-        if (cachedJoinBitmap != null) {
-            cachedJoinBitmap.recycle();
-            cachedJoinBitmap = null;
+        synchronized (joinLock) {
+            lastJoinUser = null;
+            lastJoinTimestamp = 0L;
+            lastJoinRenderedTs = -1;
+            for (int i = 0; i < joinBitmaps.length; i++) {
+                if (joinBitmaps[i] != null && !joinBitmaps[i].isRecycled()) joinBitmaps[i].recycle();
+                joinBitmaps[i] = null;
+            }
+            cachedJoinW = -1;
+            cachedJoinH = -1;
+            joinFrontIndex = 0;
         }
     }
 
@@ -213,25 +233,31 @@ public class TikTokChatBus {
         if (w <= 0 || h <= 0) return null;
         List<ChatEntry> snapshot;
         synchronized (chatLock) {
-            if (!chatDirty && cachedChatBitmap != null && cachedChatW == w && cachedChatH == h) {
-                return cachedChatBitmap;
+            Bitmap front = chatBitmaps[chatFrontIndex];
+            if (!chatDirty && front != null && !front.isRecycled() && cachedChatW == w && cachedChatH == h) {
+                return front;
             }
             snapshot = new ArrayList<>(chatLines);
             chatDirty = false;
         }
 
-        if (cachedChatBitmap == null || cachedChatW != w || cachedChatH != h) {
-            if (cachedChatBitmap != null) cachedChatBitmap.recycle();
-            cachedChatBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-            cachedChatW = w;
-            cachedChatH = h;
+        // Gambar ke buffer BELAKANG (bukan yang lagi dibaca render thread), supaya render thread
+        // yang mungkin lagi baca "front" tidak pernah lihat frame setengah-gambar.
+        int backIndex = 1 - chatFrontIndex;
+        boolean sizeChanged = (cachedChatW != w || cachedChatH != h);
+        Bitmap backBitmap = chatBitmaps[backIndex];
+        if (backBitmap == null || backBitmap.isRecycled() || sizeChanged) {
+            if (backBitmap != null && !backBitmap.isRecycled()) backBitmap.recycle();
+            backBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            chatBitmaps[backIndex] = backBitmap;
         } else {
-            cachedChatBitmap.eraseColor(Color.TRANSPARENT);
+            backBitmap.eraseColor(Color.TRANSPARENT);
         }
 
-        final Bitmap targetBitmap = cachedChatBitmap;
+        final Bitmap targetBitmap = backBitmap;
         final int targetW = w;
         final int targetH = h;
+        final int targetBackIndex = backIndex;
 
         // FIX: Rendering views to bitmap HARUS di UI thread untuk menghindari Resources$NotFoundException
         // (ResourcesOffloading) dan race condition pada LayoutInflater/View drawing di Android 13+.
@@ -260,9 +286,21 @@ public class TikTokChatBus {
                     View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
             container.layout(0, 0, targetW, targetH);
             container.draw(canvas);
+
+            // Gambar selesai - baru sekarang buffer ini "sah" jadi front, di-swap di dalam lock
+            // yang sama dipakai render thread supaya tidak pernah kebaca separuh-jadi.
+            synchronized (chatLock) {
+                cachedChatW = targetW;
+                cachedChatH = targetH;
+                chatFrontIndex = targetBackIndex;
+            }
         });
 
-        return cachedChatBitmap;
+        // Kembalikan front yang masih valid (boleh 1 frame "telat", tapi selalu lengkap/utuh).
+        synchronized (chatLock) {
+            Bitmap front = chatBitmaps[chatFrontIndex];
+            return (front != null && !front.isRecycled()) ? front : null;
+        }
     }
 
     /** Overlay gift, cuma tampil GIFT_DISPLAY_MS sejak gift terakhir masuk. Null kalau lagi tidak ada / sudah expired. */
@@ -271,22 +309,29 @@ public class TikTokChatBus {
         if (lastGiftUser == null) return null;
         if (System.currentTimeMillis() - lastGiftTimestamp > GIFT_DISPLAY_MS) return null;
 
-        if (cachedGiftBitmap != null && cachedGiftW == w && cachedGiftH == h && lastGiftRenderedTs == lastGiftTimestamp) {
-            return cachedGiftBitmap;
+        synchronized (giftLock) {
+            Bitmap front = giftBitmaps[giftFrontIndex];
+            if (front != null && !front.isRecycled() && cachedGiftW == w && cachedGiftH == h
+                    && lastGiftRenderedTs == lastGiftTimestamp) {
+                return front;
+            }
         }
 
-        if (cachedGiftBitmap == null || cachedGiftW != w || cachedGiftH != h) {
-            if (cachedGiftBitmap != null) cachedGiftBitmap.recycle();
-            cachedGiftBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-            cachedGiftW = w;
-            cachedGiftH = h;
+        int backIndex = 1 - giftFrontIndex;
+        boolean sizeChanged = (cachedGiftW != w || cachedGiftH != h);
+        Bitmap backBitmap = giftBitmaps[backIndex];
+        if (backBitmap == null || backBitmap.isRecycled() || sizeChanged) {
+            if (backBitmap != null && !backBitmap.isRecycled()) backBitmap.recycle();
+            backBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            giftBitmaps[backIndex] = backBitmap;
         } else {
-            cachedGiftBitmap.eraseColor(Color.TRANSPARENT);
+            backBitmap.eraseColor(Color.TRANSPARENT);
         }
 
-        final Bitmap targetBitmap = cachedGiftBitmap;
+        final Bitmap targetBitmap = backBitmap;
         final int targetW = w;
         final int targetH = h;
+        final int targetBackIndex = backIndex;
         final long timestamp = lastGiftTimestamp;
         final String user = lastGiftUser;
         final String giftName = lastGiftName;
@@ -324,9 +369,18 @@ public class TikTokChatBus {
                     View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
             view.layout(0, 0, targetW, targetH);
             view.draw(canvas);
+
+            synchronized (giftLock) {
+                cachedGiftW = targetW;
+                cachedGiftH = targetH;
+                giftFrontIndex = targetBackIndex;
+            }
         });
 
-        return cachedGiftBitmap;
+        synchronized (giftLock) {
+            Bitmap front = giftBitmaps[giftFrontIndex];
+            return (front != null && !front.isRecycled()) ? front : null;
+        }
     }
 
     /** Overlay join, cuma tampil JOIN_DISPLAY_MS sejak join terakhir masuk. Null kalau lagi tidak ada / sudah expired. */
@@ -335,22 +389,29 @@ public class TikTokChatBus {
         if (lastJoinUser == null) return null;
         if (System.currentTimeMillis() - lastJoinTimestamp > JOIN_DISPLAY_MS) return null;
 
-        if (cachedJoinBitmap != null && cachedJoinW == w && cachedJoinH == h && lastJoinRenderedTs == lastJoinTimestamp) {
-            return cachedJoinBitmap;
+        synchronized (joinLock) {
+            Bitmap front = joinBitmaps[joinFrontIndex];
+            if (front != null && !front.isRecycled() && cachedJoinW == w && cachedJoinH == h
+                    && lastJoinRenderedTs == lastJoinTimestamp) {
+                return front;
+            }
         }
 
-        if (cachedJoinBitmap == null || cachedJoinW != w || cachedJoinH != h) {
-            if (cachedJoinBitmap != null) cachedJoinBitmap.recycle();
-            cachedJoinBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-            cachedJoinW = w;
-            cachedJoinH = h;
+        int backIndex = 1 - joinFrontIndex;
+        boolean sizeChanged = (cachedJoinW != w || cachedJoinH != h);
+        Bitmap backBitmap = joinBitmaps[backIndex];
+        if (backBitmap == null || backBitmap.isRecycled() || sizeChanged) {
+            if (backBitmap != null && !backBitmap.isRecycled()) backBitmap.recycle();
+            backBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            joinBitmaps[backIndex] = backBitmap;
         } else {
-            cachedJoinBitmap.eraseColor(Color.TRANSPARENT);
+            backBitmap.eraseColor(Color.TRANSPARENT);
         }
 
-        final Bitmap targetBitmap = cachedJoinBitmap;
+        final Bitmap targetBitmap = backBitmap;
         final int targetW = w;
         final int targetH = h;
+        final int targetBackIndex = backIndex;
         final long timestamp = lastJoinTimestamp;
         final String user = lastJoinUser;
         final String profileUrl = lastJoinProfileUrl;
@@ -371,7 +432,7 @@ public class TikTokChatBus {
                 } else {
                     android.util.Log.e("TikTokChatBus", "TextView join_user_text NOT FOUND in layout!");
                 }
-                
+
                 if (ivJoin != null) {
                     Bitmap profileBmp = getCachedImage(profileUrl);
                     if (profileBmp != null) {
@@ -390,11 +451,22 @@ public class TikTokChatBus {
                         View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
                 view.layout(0, 0, targetW, targetH);
                 view.draw(canvas);
+
+                synchronized (joinLock) {
+                    cachedJoinW = targetW;
+                    cachedJoinH = targetH;
+                    joinFrontIndex = targetBackIndex;
+                }
+
+                android.util.Log.d("TikTokChatBus", "Join Overlay drawn successfully");
             } catch (Exception e) {
                 android.util.Log.e("TikTokChatBus", "Error inflating/drawing join overlay", e);
             }
         });
 
-        return cachedJoinBitmap;
+        synchronized (joinLock) {
+            Bitmap front = joinBitmaps[joinFrontIndex];
+            return (front != null && !front.isRecycled()) ? front : null;
+        }
     }
 }

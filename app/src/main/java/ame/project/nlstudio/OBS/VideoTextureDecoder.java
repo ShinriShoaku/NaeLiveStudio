@@ -26,6 +26,13 @@ import java.util.concurrent.TimeUnit;
 public class VideoTextureDecoder {
     private static final String TAG = "VideoDecoder-GPU";
 
+    // OPTIMASI: sebelumnya tiap panggil start()/setPlayWhenReady()/stop() bikin
+    // `new Handler(Looper.getMainLooper())` baru - tidak mahal utk 1x panggilan, tapi
+    // setPlayWhenReady() bisa terpanggil berulang kali (ganti scene, play/pause dari editor,
+    // dsb) dan tiap objek Handler baru ini nge-alokasi tanpa perlu. Cukup 1 Handler statis yang
+    // dipakai bersama, karena semuanya sama-sama post ke main looper.
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+
     public interface Listener {
         default void onFrameAvailable() {}
         default void onComplete() {}
@@ -72,7 +79,7 @@ public class VideoTextureDecoder {
             if (listener != null && running) listener.onFrameAvailable();
         });
 
-        new Handler(Looper.getMainLooper()).post(() -> {
+        MAIN_HANDLER.post(() -> {
             if (!running) return;
             try {
                 VideoDiskCacheManager cacheManager = VideoDiskCacheManager.getInstance(context);
@@ -149,7 +156,7 @@ public class VideoTextureDecoder {
 
     public void setPlayWhenReady(boolean play) {
         if (exoPlayer != null) {
-            new Handler(Looper.getMainLooper()).post(() -> {
+            MAIN_HANDLER.post(() -> {
                 if (exoPlayer != null) exoPlayer.setPlayWhenReady(play);
             });
         }
@@ -169,7 +176,7 @@ public class VideoTextureDecoder {
                 releasePlayerSafely(player);
             } else {
                 CountDownLatch latch = new CountDownLatch(1);
-                new Handler(Looper.getMainLooper()).post(() -> {
+                MAIN_HANDLER.post(() -> {
                     releasePlayerSafely(player);
                     latch.countDown();
                 });

@@ -97,7 +97,6 @@ public class StreamService extends Service implements ConnectChecker {
     private ImageReader globalImageReader;
     private HandlerThread globalScreenThread;
     private Bitmap globalScreenBitmap;
-    private volatile boolean globalScreenDirty = false;
     private final Object globalScreenLock = new Object();
     private int globalCapW = 720;
     private int globalCapH = 1280;
@@ -253,6 +252,14 @@ public class StreamService extends Service implements ConnectChecker {
     private RtmpStream rtmpStream;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean isTestRecording = false;
+    // FIX: dulu export ke Gallery cuma kejadian lewat callback auto-timer 30 detik
+    // (finishTestRecord()). Sekarang limitnya dihapus (lihat startTestRecord()), jadi
+    // satu-satunya cara berhenti rekam adalah tombol Stop manual - field ini nyimpen info
+    // rekaman yang lagi jalan supaya stopEverything() bisa export-nya ke Gallery juga.
+    private String activeTestRecordPath;
+    private String activeTestRecordEncoderLabel;
+    private int activeTestRecordWidth;
+    private int activeTestRecordHeight;
     private boolean isStopping = false;
 
     // Disimpan supaya scene bisa gonta-ganti tanpa minta izin screen-capture berkali-kali,
@@ -380,114 +387,61 @@ public class StreamService extends Service implements ConnectChecker {
     private void unbindKanaeService() {
         if (!kanaeBound) return;
         try {
-            if (kanaeService != null) {
-                kanaeService.unregisterCallback(kanaeCallback);
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "Gagal unregisterCallback dari Kanae", e);
+            if (kanaeService != null) kanaeService.unregisterCallback(kanaeCallback);
+        } catch (Exception ignored) {
         }
         try {
             unbindService(kanaeConnection);
-            Log.d(TAG, "unbindKanaeService: unbindService() sukses");
-        } catch (Exception e) {
-            Log.w(TAG, "unbindKanaeService gagal atau sudah tidak terikat", e);
+        } catch (Exception ignored) {
         }
         kanaeService = null;
         kanaeBound = false;
     }
 
-    @Override
-    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
-        super.onConfigurationChanged(newConfig);
-        // Deteksi rotasi lewat config change sebagai backup DisplayListener
-        Log.d(TAG, "DEBUG-ORIENTATION: onConfigurationChanged triggered");
-        handler.removeCallbacks(ensureRotationRunnable);
-        // 300ms sempat kepotong sebelum display benar2 settle di beberapa device -> capture
-        // kebentuk di orientasi transisi (gepeng). Dinaikkan jadi 600ms.
-        handler.postDelayed(ensureRotationRunnable, 600);
-    }
-
     public void startGlobalScreenCapture(MediaProjection mp) {
-        if (mp == null) return;
+        if (globalVirtualDisplay != null || mp == null) return;
+        Log.d(TAG, "startGlobalScreenCapture: initializing VirtualDisplay for Android 14+");
 
         DisplayMetrics metrics = getResources().getDisplayMetrics();
         int screenW = metrics.widthPixels;
         int screenH = metrics.heightPixels;
-        Log.d(TAG, "DEBUG-ORIENTATION: Checking capture config. Screen: " + screenW + "x" + screenH);
 
-        // FIX LOGIC: Tentukan dimensi VirtualDisplay agar SELALU mengikuti orientasi fisik layar.
-        // Jika layar Landscape, buffer capture harus Landscape. Jika Portrait, buffer harus Portrait.
-        int maxDim = Math.max(savedWidth, savedHeight);
-        int minDim = Math.min(savedWidth, savedHeight);
+        float designRatio = (float) savedWidth / savedHeight;
+        float screenRatio = (float) screenW / screenH;
 
-        int newCapW, newCapH;
-        if (screenW >= screenH) {
-            // HP sedang Landscape
-            newCapW = maxDim;
-            newCapH = minDim;
+        if (screenRatio > designRatio) {
+            globalCapW = savedWidth;
+            globalCapH = Math.round(savedWidth / screenRatio);
         } else {
-            // HP sedang Portrait
-            newCapW = minDim;
-            newCapH = maxDim;
+            globalCapH = savedHeight;
+            globalCapW = Math.round(savedHeight * screenRatio);
         }
 
-        // Jika sudah ada dan resolusinya masih sama, tidak perlu buat ulang
-        if (globalVirtualDisplay != null && newCapW == globalCapW && newCapH == globalCapH) {
-            Log.d(TAG, "DEBUG-ORIENTATION: Skip reconfiguration, dimensions match: " + newCapW + "x" + newCapH);
-            return;
-        }
-
-        Log.d(TAG, "DEBUG-ORIENTATION: (RE)CONFIGURING VirtualDisplay to " + newCapW + "x" + newCapH);
-
-        // Cleanup old capture resources if any
-        if (globalVirtualDisplay != null) {
-            globalVirtualDisplay.release();
-            globalVirtualDisplay = null;
-        }
-        if (globalImageReader != null) {
-            globalImageReader.close();
-            globalImageReader = null;
-        }
-
-        globalCapW = newCapW;
-        globalCapH = newCapH;
-
-        if (globalScreenThread == null) {
-            globalScreenThread = new HandlerThread("GlobalScreenCap");
-            globalScreenThread.start();
-        }
-        Handler capHandler = new Handler(globalScreenThread.getLooper());
+        globalScreenThread = new HandlerThread("GlobalScreenCap");
+        globalScreenThread.start();
+        Handler handler = new Handler(globalScreenThread.getLooper());
 
         globalImageReader = ImageReader.newInstance(globalCapW, globalCapH, PixelFormat.RGBA_8888, 2);
-        try {
-            globalVirtualDisplay = mp.createVirtualDisplay("GlobalScreen",
-                    globalCapW, globalCapH, metrics.densityDpi,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    globalImageReader.getSurface(), null, new Handler(Looper.getMainLooper()));
+        globalVirtualDisplay = mp.createVirtualDisplay("GlobalScreen",
+                globalCapW, globalCapH, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                globalImageReader.getSurface(), null, new Handler(Looper.getMainLooper()));
 
-            globalImageReader.setOnImageAvailableListener(reader -> {
-                try {
-                    Image image = reader.acquireLatestImage();
-                    if (image != null) {
-                        updateGlobalScreenBitmap(image);
-                        image.close();
-                    }
-                } catch (Exception ignored) {}
-            }, capHandler);
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to create VirtualDisplay", e);
-        }
+        globalImageReader.setOnImageAvailableListener(reader -> {
+            try {
+                Image image = reader.acquireLatestImage();
+                if (image != null) {
+                    updateGlobalScreenBitmap(image);
+                    image.close();
+                }
+            } catch (Exception ignored) {}
+        }, handler);
     }
 
     public void ensureGlobalScreenCapture() {
-        if (savedMediaProjection == null) return;
-        // FIX: dulu ini cuma jalan kalau globalVirtualDisplay == null, jadi kalau capture
-        // sempat kebentuk dengan orientasi SALAH (mis. race saat rotasi), dia tidak pernah
-        // dikoreksi lagi sampai stream dihentikan (VirtualDisplay-nya sudah "ada", cuma
-        // ukurannya salah). Sekarang selalu re-check; startGlobalScreenCapture() sendiri
-        // sudah punya guard "skip kalau dimensi sudah sama" jadi ini murah/no-op kalau
-        // memang belum ada perubahan orientasi.
-        startGlobalScreenCapture(savedMediaProjection);
+        if (globalVirtualDisplay == null && savedMediaProjection != null) {
+            startGlobalScreenCapture(savedMediaProjection);
+        }
     }
 
     private void updateGlobalScreenBitmap(Image image) {
@@ -498,19 +452,44 @@ public class StreamService extends Service implements ConnectChecker {
             int rowStride = planes[0].getRowStride();
             int rowPadding = rowStride - pixelStride * image.getWidth();
             int bitmapWidth = image.getWidth() + rowPadding / pixelStride;
+            
+            int bitmapHeight = image.getHeight();
 
             synchronized (globalScreenLock) {
-                if (globalScreenBitmap == null || globalScreenBitmap.getWidth() != bitmapWidth || globalScreenBitmap.getHeight() != image.getHeight()) {
+                if (globalScreenBitmap == null || globalScreenBitmap.getWidth() != bitmapWidth || globalScreenBitmap.getHeight() != bitmapHeight) {
                     if (globalScreenBitmap != null) globalScreenBitmap.recycle();
-                    globalScreenBitmap = Bitmap.createBitmap(bitmapWidth, image.getHeight(), Bitmap.Config.ARGB_8888);
-                    Log.d(TAG, "Created globalScreenBitmap: " + bitmapWidth + "x" + image.getHeight());
+                    globalScreenBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
+                    Log.d(TAG, "Created globalScreenBitmap: " + bitmapWidth + "x" + bitmapHeight);
+                    
+                    // RE-ADJUST: Jika orientasi berubah, pastikan VirtualDisplay juga menyesuaikan
+                    // agar capture tidak terpotong atau gepeng di sisi internal VirtualDisplay-nya.
+                    checkOrientationChange(image.getWidth(), image.getHeight());
                 }
                 buffer.rewind();
                 globalScreenBitmap.copyPixelsFromBuffer(buffer);
-                globalScreenDirty = true;
             }
         } catch (Exception e) {
             Log.e(TAG, "updateGlobalScreenBitmap error", e);
+        }
+    }
+
+    private long lastOrientationCheckTime = 0;
+    private void checkOrientationChange(int currentW, int currentH) {
+        long now = System.currentTimeMillis();
+        if (now - lastOrientationCheckTime < 2000) return; // Debounce 2 detik biar gak lag
+        lastOrientationCheckTime = now;
+
+        if (globalVirtualDisplay != null) {
+            DisplayMetrics metrics = getResources().getDisplayMetrics();
+            int screenW = metrics.widthPixels;
+            int screenH = metrics.heightPixels;
+            
+            // Jika resolusi layar HP benar-benar berbeda dari resolusi capture saat ini
+            if (Math.abs(screenW - currentW) > 10 || Math.abs(screenH - currentH) > 10) {
+                Log.i(TAG, "Orientation/Screen size change detected! Re-adjusting VirtualDisplay.");
+                // resize virtual display agar capture area-nya pas dengan layar baru
+                globalVirtualDisplay.resize(globalCapW, globalCapH, metrics.densityDpi);
+            }
         }
     }
 
@@ -521,36 +500,9 @@ public class StreamService extends Service implements ConnectChecker {
         }
     }
 
-    public boolean isGlobalScreenDirty() {
-        return globalScreenDirty;
-    }
-
-    public void clearGlobalScreenDirty() {
-        globalScreenDirty = false;
-    }
-
     public Object getGlobalScreenLock() { return globalScreenLock; }
     public int getGlobalCapW() { return globalCapW; }
     public int getGlobalCapH() { return globalCapH; }
-
-    private final android.hardware.display.DisplayManager.DisplayListener displayListener = new android.hardware.display.DisplayManager.DisplayListener() {
-        @Override
-        public void onDisplayAdded(int displayId) {}
-        @Override
-        public void onDisplayRemoved(int displayId) {}
-        @Override
-        public void onDisplayChanged(int displayId) {
-            if (displayId == android.view.Display.DEFAULT_DISPLAY) {
-                // Deteksi rotasi. Ini trigger UTAMA & otomatis dari Android (DisplayManager),
-                // tidak butuh polling manual. 600ms debounce supaya tidak nangkap frame
-                // di tengah transisi rotasi (penyebab capture kebentuk "gepeng").
-                handler.removeCallbacks(ensureRotationRunnable);
-                handler.postDelayed(ensureRotationRunnable, 600);
-            }
-        }
-    };
-
-    private final Runnable ensureRotationRunnable = this::ensureGlobalScreenCapture;
 
     @Override
     public void onCreate() {
@@ -560,19 +512,7 @@ public class StreamService extends Service implements ConnectChecker {
         rtmpStream = new RtmpStream(this, this);
         AudioLevelBus.registerListener(audioLevelListener);
         TikTokChatBus.getInstance().reset();
-
-        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-        if (dm != null) dm.registerDisplayListener(displayListener, handler);
-
         bindKanaeService();
-        // Tidak perlu polling manual tiap 2 detik lagi. Android sudah otomatis kasih tau lewat
-        // 2 jalur berikut (keduanya sudah terdaftar / di-override di class ini):
-        //  1. DisplayManager.DisplayListener.onDisplayChanged() - trigger utama, langsung dari OS
-        //     saat rotasi/konfigurasi display berubah (didaftarkan di atas, beberapa baris ke atas).
-        //  2. Service#onConfigurationChanged() - backup, dipanggil OS ke semua komponen app saat
-        //     Configuration (termasuk orientasi) berubah.
-        // Keduanya sudah didebounce 600ms lalu manggil ensureGlobalScreenCapture(), yang sekarang
-        // juga sudah dibuat self-correcting (lihat komentar di ensureGlobalScreenCapture()).
     }
 
     private void acquireLocks() {
@@ -1275,27 +1215,35 @@ public class StreamService extends Service implements ConnectChecker {
         try {
             rtmpStream.startRecord(outputPath, status -> {});
             isTestRecording = true;
-            Toast.makeText(this, "Merekam... (30 detik)", Toast.LENGTH_SHORT).show();
+            activeTestRecordPath = outputPath;
+            activeTestRecordEncoderLabel = encoderLabel;
+            activeTestRecordWidth = width;
+            activeTestRecordHeight = height;
+            Toast.makeText(this, "Merekam...", Toast.LENGTH_SHORT).show();
         } catch (Exception e) {
             Toast.makeText(this, "Gagal mulai rekam: " + e.getMessage(), Toast.LENGTH_LONG).show();
             stopEverything();
             return;
         }
 
-        handler.postDelayed(() -> {
-            if (isTestRecording) {
-                finishTestRecord(outputPath, encoderLabel, width, height);
-            }
-        }, durationMs);
+        // FIX: limit rekam test 30 detik DIHAPUS atas permintaan user - dulu di sini ada
+        // handler.postDelayed(..., durationMs) yang otomatis manggil finishTestRecord() setelah
+        // durationMs (default 30000L). Sekarang rekaman jalan terus sampai user pencet Stop
+        // secara manual (lihat exportTestRecordToGallery() yang sekarang dipanggil dari
+        // stopEverything() - export ke Gallery-nya jalan dari SANA, bukan dari timer lagi).
+        // Parameter durationMs sengaja dibiarkan di signature method ini (tidak dipakai) supaya
+        // caller lama (MainActivity/EXTRA_TEST_DURATION_MS) tidak perlu diubah - cukup diabaikan.
     }
 
-    private void finishTestRecord(String tempPath, String encoderLabel, int w, int h) {
-        if (rtmpStream != null && rtmpStream.isRecording()) {
-            rtmpStream.stopRecord();
-        }
-        isTestRecording = false;
-
-        // 2. Export file dari folder internal ke Gallery (MediaStore)
+    /** Export file rekaman test dari folder internal ke Gallery (MediaStore) dan kembalikan
+     *  pesan status hasilnya. Dipanggil dari stopEverything() SETELAH rtmpStream.stopRecord()
+     *  sudah dipanggil di sana.
+     *
+     *  PENTING: method ini SENGAJA tidak memanggil stopEverything() sendiri (beda dari versi
+     *  lama/finishTestRecord()) - karena kalau dipanggil DARI DALAM stopEverything(), pemanggilan
+     *  stopEverything() bersarang bakal langsung ke-block sama guard `isStopping` dan pesan
+     *  status "Tersimpan ke Gallery" TIDAK PERNAH ke-broadcast ke MainActivity. */
+    private String exportTestRecordToGallery(String tempPath, String encoderLabel, int w, int h) {
         try {
             android.content.ContentValues values = new android.content.ContentValues();
             String timestamp = new java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault()).format(new java.util.Date());
@@ -1315,13 +1263,15 @@ public class StreamService extends Service implements ConnectChecker {
                         os.write(buffer, 0, read);
                     }
                 }
-                stopEverything("Rekaman Selesai & Tersimpan ke Gallery");
                 Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show();
+                return "Rekaman Selesai & Tersimpan ke Gallery";
             }
+            Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
+            return "Rekaman Selesai, Gagal Simpan ke Gallery";
         } catch (Exception e) {
             Log.e(TAG, "Gagal export ke gallery", e);
-            stopEverything("Rekaman Selesai, Gagal Simpan ke Gallery");
             Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
+            return "Rekaman Selesai, Gagal Simpan ke Gallery";
         }
     }
 
@@ -1443,7 +1393,15 @@ public class StreamService extends Service implements ConnectChecker {
         isStopping = true;
 
         handler.removeCallbacksAndMessages(null);
-        unbindKanaeService();
+
+        // Simpan dulu info rekaman test yang lagi aktif SEBELUM di-reset, supaya bisa di-export
+        // ke Gallery kalau memang ada rekaman test yang lagi jalan (lihat exportTestRecordToGallery()).
+        boolean wasTestRecording = isTestRecording;
+        String testRecordPath = activeTestRecordPath;
+        String testRecordEncoderLabel = activeTestRecordEncoderLabel;
+        int testRecordWidth = activeTestRecordWidth;
+        int testRecordHeight = activeTestRecordHeight;
+
         try {
             if (rtmpStream != null && rtmpStream.isRecording()) {
                 rtmpStream.stopRecord();
@@ -1451,6 +1409,17 @@ public class StreamService extends Service implements ConnectChecker {
         } catch (Exception ignored) {
         }
         isTestRecording = false;
+        activeTestRecordPath = null;
+
+        // FIX: sebelumnya export ke Gallery HANYA terjadi lewat callback auto-timer 30 detik
+        // (finishTestRecord()). Karena limit itu sudah dihapus di startTestRecord(), stop manual
+        // (tombol Stop di MainActivity, yang manggil stopService() -> onDestroy() -> di sini)
+        // sekarang jadi satu-satunya jalur berhenti - jadi export-nya WAJIB dijalankan di sini
+        // juga, kalau tidak file rekaman cuma nyangkut di folder temp internal dan hilang tanpa
+        // pernah masuk Gallery.
+        if (wasTestRecording && testRecordPath != null) {
+            finalMsg = exportTestRecordToGallery(testRecordPath, testRecordEncoderLabel, testRecordWidth, testRecordHeight);
+        }
         try {
             if (rtmpStream != null && rtmpStream.isStreaming()) {
                 rtmpStream.stopStream();
@@ -1506,10 +1475,6 @@ public class StreamService extends Service implements ConnectChecker {
         instance = null;
         sceneSwitchExecutor.shutdownNow();
         AudioLevelBus.unregisterListener(audioLevelListener);
-
-        DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
-        if (dm != null) dm.unregisterDisplayListener(displayListener);
-
         unbindKanaeService();
         TikTokChatBus.getInstance().reset();
         MusicBus.getInstance().reset();
@@ -1564,6 +1529,11 @@ public class StreamService extends Service implements ConnectChecker {
 
     @Override
     public void onConnectionFailed(String reason) {
+        if (!isAfkActive && !isStopping) {
+            Log.w(TAG, "Connection failed, entering AFK mode automatically.");
+            enterAfkMode();
+        }
+
         if (retryCount < MAX_RETRIES && !isStopping && lastRtmpUrl != null && !lastRtmpUrl.isEmpty()) {
             retryCount++;
             sendStatusBroadcast("Koneksi terputus, mencoba lagi (" + retryCount + ")...");
@@ -1637,12 +1607,17 @@ public class StreamService extends Service implements ConnectChecker {
         // Render ulang bitmap AFK dengan bitrate terbaru
         Bitmap afkBitmap = renderAfkBitmap();
         if (afkBitmap != null && rtmpStream != null) {
-            // Kita buat source baru dari bitmap AFK yang sudah di-update teks bitratenya.
-            // Tidak perlu fade snapshot di sini agar transisi angka bitrate terlihat langsung.
-            FakeSceneVideoSource source = new FakeSceneVideoSource(this, afkBitmap);
-            source.setResolution(savedWidth, savedHeight);
-            rtmpStream.changeVideoSource(source);
-            currentSceneSource = source;
+            // OPTIMASI: Jangan panggil changeVideoSource() tiap detik (berat).
+            // Cukup update bitmap di source yang sudah ada jika tipenya memang FakeScene.
+            if (currentSceneSource instanceof FakeSceneVideoSource) {
+                ((FakeSceneVideoSource) currentSceneSource).updateStaticImage(afkBitmap);
+            } else {
+                // Fallback jika karena suatu alasan source-nya bukan FakeScene (misal baru aktivasi)
+                FakeSceneVideoSource source = new FakeSceneVideoSource(this, afkBitmap);
+                source.setResolution(savedWidth, savedHeight);
+                rtmpStream.changeVideoSource(source);
+                currentSceneSource = source;
+            }
         }
     }
 

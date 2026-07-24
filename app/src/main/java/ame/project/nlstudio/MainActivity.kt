@@ -365,7 +365,7 @@ class MainActivity : AppCompatActivity() {
         if (type == LayerType.MUSIC) {
             editingLayers.removeAll { it.type == LayerType.MUSIC }
         }
-        
+
         val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
         val newLayer = SceneLayer(
             id = UUID.randomUUID().toString(),
@@ -393,13 +393,13 @@ class MainActivity : AppCompatActivity() {
         // Initialize Video Disk Cache (Media3)
         VideoDiskCacheManager.getInstance(this)
 
-        // Log.d(TAG, "=== onCreate ===")
-        // Log.d(TAG, "DisplayMetrics: ${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}")
-        // Log.d(TAG, "Orientation: ${resources.configuration.orientation}")
-        // Log.d(TAG, "Loaded scenes: ${scenes.size}")
-        // scenes.forEach { scene ->
-        //     Log.d(TAG, "  Scene[${scene.id}]: ${scene.name} | bg=${scene.backgroundType} | root=${scene.rootWidth}x${scene.rootHeight} | layers=${scene.layers.size}")
-        // }
+        Log.d(TAG, "=== onCreate ===")
+        Log.d(TAG, "DisplayMetrics: ${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}")
+        Log.d(TAG, "Orientation: ${resources.configuration.orientation}")
+        Log.d(TAG, "Loaded scenes: ${scenes.size}")
+        scenes.forEach { scene ->
+            Log.d(TAG, "  Scene[${scene.id}]: ${scene.name} | bg=${scene.backgroundType} | root=${scene.rootWidth}x${scene.rootHeight} | layers=${scene.layers.size}")
+        }
 
         // Initialize adapter early to avoid UninitializedPropertyAccessException
         sceneAdapter = SceneAdapter(
@@ -539,7 +539,7 @@ class MainActivity : AppCompatActivity() {
 
         etVideoBitrate.setText(prefs.getString("video_bitrate", "2500"))
         etAudioBitrate.setText(prefs.getString("audio_bitrate", "128"))
-        
+
         // Load volume slider positions if saved
         val micVol = prefs.getInt("vol_mic", 100)
         val systemVol = prefs.getInt("vol_system", 100)
@@ -649,7 +649,7 @@ class MainActivity : AppCompatActivity() {
         vuMusicLevel = root.findViewById(R.id.vuMusicLevel)
 
         setupVolumeSliders()
-        
+
         // Restore values after view binding
         val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
         seekMicVolume.progress = prefs.getInt("vol_mic", 100)
@@ -819,7 +819,7 @@ class MainActivity : AppCompatActivity() {
         selectedLayerId = layerId
         sceneCanvasView.setSelectedLayer(layerId)
         editorLayerAdapter?.submitList(editingLayers, layerId)
-        
+
         // If it's a music layer, maybe show a hint or something?
     }
 
@@ -881,7 +881,7 @@ class MainActivity : AppCompatActivity() {
                 val effect = effects[which]
                 // Play in preview immediately
                 quickAnimationView.startAnimation(effect)
-                
+
                 // Add as layer if persistent (like SNOW, BUBBLES, etc) or just trigger if burst
                 addLayer(LayerType.EFFECT, "effect:${effect.name}", w = 1.0f, h = 1.0f)
             }
@@ -1065,7 +1065,6 @@ class MainActivity : AppCompatActivity() {
             targetW to targetH
         }
 
-        /*
         Log.d(TAG, "=== saveCurrentEditingScene ===")
         Log.d(TAG, "  Name=$name, existingId=$safeExistingId")
         Log.d(TAG, "  editingForcedRootResolution=$editingForcedRootResolution")
@@ -1076,7 +1075,6 @@ class MainActivity : AppCompatActivity() {
         editingLayers.forEach { layer ->
             Log.d(TAG, "    Layer[${layer.id}]: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h} z=${layer.zIndex}")
         }
-        */
 
         val scene = sceneRepository.buildOrUpdateScene(
             existingId = safeExistingId,
@@ -1128,7 +1126,6 @@ class MainActivity : AppCompatActivity() {
 
     /** Load scene yang udah tersimpan ke kanvas editor, biar bisa diedit lagi (posisi layer, background, dll). */
     private fun loadSceneIntoEditor(scene: Scene) {
-        /*
         Log.d(TAG, "=== loadSceneIntoEditor ===")
         Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
         Log.d(TAG, "  root=${scene.rootWidth}x${scene.rootHeight}")
@@ -1137,7 +1134,6 @@ class MainActivity : AppCompatActivity() {
         scene.layers.forEach { layer ->
             Log.d(TAG, "    Layer: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h}")
         }
-        */
 
         editingSceneId = scene.id
         editingBackgroundType = scene.backgroundType
@@ -1584,7 +1580,9 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnTestRecord)?.setOnClickListener {
             val encoderLabel = spinnerEncoderType.selectedItem.toString()
-            Toast.makeText(this, "Merekam 30 detik pakai encoder: $encoderLabel", Toast.LENGTH_SHORT).show()
+            // FIX: limit rekam test 30 detik sudah dihapus (lihat StreamService.startTestRecord())
+            // - sekarang rekam jalan terus sampai user pencet tombol Stop secara manual.
+            Toast.makeText(this, "Merekam pakai encoder: $encoderLabel", Toast.LENGTH_SHORT).show()
             firebaseAnalytics.logEvent("record_start_clicked", null)
             pendingAction = StreamService.ACTION_TEST_RECORD
             checkPermissionsThenStart()
@@ -1749,7 +1747,7 @@ class MainActivity : AppCompatActivity() {
                     override fun onSuccess(outputUri: Uri) {
                         // Hapus file cache lama
                         val oldUri = scene.backgroundUri
-                        
+
                         // Update URI di scene
                         scene.backgroundUri = outputUri.toString()
                         sceneRepository.saveScenes(scenes) // Simpan semua ke disk
@@ -1759,7 +1757,7 @@ class MainActivity : AppCompatActivity() {
                             editingBackgroundUri = outputUri.toString()
                             runOnUiThread { refreshCanvasBackground() }
                         }
-                        
+
                         // Hapus file fisik lama JIKA itu file cache
                         oldUri?.takeIf { it.startsWith("file://") && it != outputUri.toString() }?.let {
                             VideoOptimizer.deleteCachedOutputFile(this@MainActivity, it)
@@ -2088,7 +2086,8 @@ class MainActivity : AppCompatActivity() {
             putExtra("audioBitrate", p.aBitrate)
             putExtra("audioSourceIndex", p.audioSourceIndex)
             putExtra(StreamService.EXTRA_ENCODER_TYPE, p.encoderType)
-            putExtra(StreamService.EXTRA_TEST_DURATION_MS, 30000L)
+            // FIX: EXTRA_TEST_DURATION_MS dihapus - StreamService.startTestRecord() sudah tidak
+            // pakai timer auto-stop lagi, rekaman jalan terus sampai tombol Stop dipencet manual.
 
             if (activeScene != null) {
                 if (activeScene.backgroundType == BackgroundType.SCREEN) {

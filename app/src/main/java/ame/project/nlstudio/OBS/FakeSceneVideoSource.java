@@ -34,8 +34,9 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
 
     private final Context context;
     private final Mode mode;
-    private final Bitmap staticImage;
+    private Bitmap staticImage;
     private final Uri videoUri;
+    private boolean isImageUpdatePending = false;
 
     private Surface targetSurface;
     private Thread drawThread;
@@ -82,6 +83,18 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
     public void setResolution(int width, int height) {
         setWidth(width);
         setHeight(height);
+    }
+
+    /**
+     * Update bitmap secara on-the-fly tanpa restart thread.
+     * Cocok buat update overlay AFK tiap detik biar gak berat.
+     */
+    public void updateStaticImage(Bitmap newBitmap) {
+        if (mode != Mode.STATIC_IMAGE) return;
+        synchronized (this) {
+            this.staticImage = newBitmap;
+            this.isImageUpdatePending = true;
+        }
     }
 
     @Override
@@ -160,14 +173,21 @@ public class FakeSceneVideoSource extends VideoSource implements SceneCrossfadeS
                 videoDecoder.updateTexImage();
                 drawTexture(oesProgram, videoTextureId, videoDecoder.getTexMatrix(), true);
             } else if (mode == Mode.STATIC_IMAGE && staticImage != null) {
-                if (imageTextureId == 0) {
-                    int[] tex = new int[1];
-                    GLES20.glGenTextures(1, tex, 0);
-                    imageTextureId = tex[0];
-                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, imageTextureId);
-                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, staticImage, 0);
+                synchronized (this) {
+                    if (imageTextureId == 0) {
+                        int[] tex = new int[1];
+                        GLES20.glGenTextures(1, tex, 0);
+                        imageTextureId = tex[0];
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, imageTextureId);
+                        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, staticImage, 0);
+                        isImageUpdatePending = false;
+                    } else if (isImageUpdatePending) {
+                        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, imageTextureId);
+                        GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, staticImage, 0);
+                        isImageUpdatePending = false;
+                    }
                 }
                 drawTexture(rgbaProgram, imageTextureId, flipMatrix, false);
             }

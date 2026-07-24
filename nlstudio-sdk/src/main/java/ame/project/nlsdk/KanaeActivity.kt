@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
@@ -61,7 +62,7 @@ class KanaeActivity : AppCompatActivity() {
         override fun onPlaybackStatusChanged(isPlaying: Boolean, position: Long, duration: Long) {
             runOnUiThread {
                 btnPlayPause.setImageResource(
-                    if (isPlaying) android.R.drawable.ic_media_pause 
+                    if (isPlaying) android.R.drawable.ic_media_pause
                     else android.R.drawable.ic_media_play,
                 )
             }
@@ -213,6 +214,44 @@ class KanaeActivity : AppCompatActivity() {
         try {
             val intent = Intent("ame.project.kanae.AIDL_SERVICE")
             intent.`package` = "ame.project.kanae"
+
+            // FIX BUG: sebelumnya di sini cuma bindService(..., BIND_AUTO_CREATE) TANPA
+            // startService() dulu. BIND_AUTO_CREATE memang bikin service Kanae otomatis dibuat
+            // pas pertama kali di-bind, TAPI service jadinya berstatus "bound-only" - begitu
+            // SEMUA client unbind (termasuk KanaeActivity ini sendiri pas onDestroy(), misal
+            // waktu user pencet tombol back balik ke MainActivity), Android langsung MATIKAN
+            // service tsb karena tidak ada yang men-"start" dia secara independen dari jumlah
+            // binding. Proses playback musik (yang hidup di dalam service app Kanae, bukan di
+            // app ini) ikut berhenti walau kita tidak pernah minta stop - persis gejala yang
+            // dilaporkan: request lagu & main di dalam KanaeActivity lancar, begitu balik ke
+            // MainActivity lagunya berhenti sendiri.
+            //
+            // Fix: startService() dulu supaya service Kanae berstatus "started" (independen dari
+            // ada/tidaknya binding), baru bindService() utk dapat interface AIDL-nya. Dengan
+            // begitu, unbindService() di onDestroy() cuma melepas koneksi AIDL - service &
+            // playback musiknya TETAP jalan di background sampai memang di-stop eksplisit
+            // (misal user pencet tombol Stop, atau service Kanae stop sendiri karena queue habis).
+            // FIX: pakai startForegroundService() (bukan startService() biasa) supaya PERSIS
+            // sama dengan cara Kanae app sendiri memanggil PlayerForegroundService-nya (lihat
+            // MainActivity.kt Kanae: startForegroundService() + bindService()). Service ini
+            // sudah didesain memanggil startForeground() SEGERA di onCreate()-nya - kontrak itu
+            // cuma terpenuhi dengan benar kalau proses "start"-nya lewat startForegroundService()/
+            // startService(), bukan cuma numpang hidup dari BIND_AUTO_CREATE.
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent)
+                } else {
+                    startService(intent)
+                }
+            } catch (e: Exception) {
+                // Bisa gagal kalau app Kanae belum terpasang, atau (jarang, karena KanaeActivity
+                // ini pasti lagi foreground saat dipanggil) kena background-start restriction
+                // Android 8+. Tetap lanjut coba bindService supaya minimal masih dapat kontrol
+                // kalau ternyata service-nya sudah hidup duluan (misal user sempat buka app
+                // Kanae langsung sebelumnya).
+                Log.w(TAG, "startForegroundService ke Kanae gagal, lanjut coba bind saja: ${e.message}")
+            }
+
             bindService(intent, connection, BIND_AUTO_CREATE)
         } catch (e: Exception) {
             Log.e(TAG, "Error binding", e)
@@ -223,7 +262,7 @@ class KanaeActivity : AppCompatActivity() {
         try {
             val isPlaying = kanaeService?.isPlaying ?: false
             btnPlayPause.setImageResource(
-                if (isPlaying) android.R.drawable.ic_media_pause 
+                if (isPlaying) android.R.drawable.ic_media_pause
                 else android.R.drawable.ic_media_play
             )
 
