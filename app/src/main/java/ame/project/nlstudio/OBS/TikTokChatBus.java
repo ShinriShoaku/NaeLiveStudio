@@ -269,8 +269,8 @@ public class TikTokChatBus {
             // Root container untuk menampung bubble chat
             LinearLayout container = new LinearLayout(themeContext);
             container.setOrientation(LinearLayout.VERTICAL);
-            container.setGravity(Gravity.BOTTOM);
-            container.setLayoutParams(new ViewGroup.LayoutParams(targetW, targetH));
+            container.setGravity(Gravity.TOP);
+            container.setLayoutParams(new ViewGroup.LayoutParams(targetW, ViewGroup.LayoutParams.WRAP_CONTENT));
 
             LayoutInflater inflater = LayoutInflater.from(themeContext);
             for (ChatEntry entry : snapshot) {
@@ -282,13 +282,33 @@ public class TikTokChatBus {
                 container.addView(view);
             }
 
+            // FIX CHAT KEPOTONG:
+            // targetH. LinearLayout non-weighted mengukur tiap child dengan SISA ruang
+            // (mode AT_MOST) yang makin menyusut seiring banyaknya child sebelumnya -
+            // begitu total tinggi bubble melebihi targetH, child TERAKHIR (chat TERBARU,
+            // karena di-addLast lalu di-iterate urut lama->baru) kebagian sisa ruang
+            // AT_MOST yang nyaris 0, jadi bubble-nya "diperas" sampai nyaris tak
+            // kelihatan/kepotong - padahal justru chat terbaru itu yang paling penting
+            // buat selalu tampil.
+            //
+            // Sekarang: ukur container dengan height UNSPECIFIED supaya SEMUA bubble
+            // dapat tinggi alami (wrap_content) tanpa diperas. Kalau total tinggi hasil
+            // ukur > targetH, geser canvas ke ATAS (translate negatif) sejumlah
+            // kelebihannya sebelum digambar, dibungkus clipRect seluas layer - efeknya
+            // cuma bubble PALING LAMA yang kepotong di bagian atas (di luar clip),
+            // sedangkan chat terbaru di bagian bawah selalu utuh & selalu terlihat.
+            int unspecHeightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
             container.measure(View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
-                    View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
-            container.layout(0, 0, targetW, targetH);
-            container.draw(canvas);
+                    unspecHeightSpec);
+            int measuredHeight = Math.max(container.getMeasuredHeight(), 1);
+            container.layout(0, 0, targetW, measuredHeight);
 
-            // Gambar selesai - baru sekarang buffer ini "sah" jadi front, di-swap di dalam lock
-            // yang sama dipakai render thread supaya tidak pernah kebaca separuh-jadi.
+            canvas.save();
+            canvas.clipRect(0, 0, targetW, targetH);
+            canvas.translate(0, targetH - measuredHeight);
+            container.draw(canvas);
+            canvas.restore();
+
             synchronized (chatLock) {
                 cachedChatW = targetW;
                 cachedChatH = targetH;
