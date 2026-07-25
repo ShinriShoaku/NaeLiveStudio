@@ -54,6 +54,16 @@ public class TikTokChatBus {
     private static final long GIFT_DISPLAY_MS = 4000L;
     private static final long JOIN_DISPLAY_MS = 3000L;
 
+    // Ukuran box layer TIKTOK_CHAT default saat pertama ditambahkan (lihat
+    // MainActivity.addTikTokChatLayer(): w=0.8, h=0.25 dari canvas desain 1080x1920)
+    // => 864x480 px. Dipakai sebagai acuan "1.0x" buat auto-scale teks/bubble chat:
+    // kalau user resize box lebih besar/kecil di editor, teks & bubble ikut membesar/
+    // mengecil proporsional, dengan batas MIN/MAX supaya tetap kebaca & tidak berlebihan.
+    private static final float CHAT_BASE_REF_W = 864f;
+    private static final float CHAT_BASE_REF_H = 480f;
+    private static final float CHAT_SCALE_MIN = 0.55f;
+    private static final float CHAT_SCALE_MAX = 2.2f;
+
     public static class ChatEntry {
         public final String user;
         public final String message;
@@ -226,6 +236,51 @@ public class TikTokChatBus {
         }
     }
 
+    /**
+     * Terapkan faktor scale ke satu bubble chat (root view item_chat_bubble_boxed.xml):
+     * - textSize username & pesan (px hasil resolve dari sp di XML, dikalikan scale)
+     * - paddingBottom root (jarak antar bubble)
+     * - margin username (marginStart) & margin/minWidth bubble pesan
+     * Semua nilai diambil dari nilai HASIL INFLATE (bukan hardcode ulang angka dp/sp di
+     * XML), supaya kalau desain item_chat_bubble_boxed.xml berubah, scaling ini otomatis
+     * ikut menyesuaikan tanpa perlu disinkronkan manual.
+     */
+    private void applyChatBubbleScale(View root, TextView tvUser, TextView tvMsg,
+                                      View bubbleContainer, float scale) {
+        if (tvUser != null) {
+            tvUser.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvUser.getTextSize() * scale);
+            ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) tvUser.getLayoutParams();
+            if (lp != null) {
+                lp.setMarginStart(Math.round(lp.getMarginStart() * scale));
+                tvUser.setLayoutParams(lp);
+            }
+        }
+        if (tvMsg != null) {
+            tvMsg.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvMsg.getTextSize() * scale);
+        }
+        if (bubbleContainer != null) {
+            ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) bubbleContainer.getLayoutParams();
+            if (lp != null) {
+                lp.setMarginStart(Math.round(lp.getMarginStart() * scale));
+                lp.topMargin = Math.round(lp.topMargin * scale);
+                bubbleContainer.setLayoutParams(lp);
+            }
+            if (bubbleContainer instanceof LinearLayout) {
+                bubbleContainer.setMinimumWidth(Math.round(bubbleContainer.getMinimumWidth() * scale));
+            }
+            bubbleContainer.setPadding(
+                    Math.round(bubbleContainer.getPaddingLeft() * scale),
+                    Math.round(bubbleContainer.getPaddingTop() * scale),
+                    Math.round(bubbleContainer.getPaddingRight() * scale),
+                    Math.round(bubbleContainer.getPaddingBottom() * scale));
+        }
+        root.setPadding(
+                Math.round(root.getPaddingLeft() * scale),
+                Math.round(root.getPaddingTop() * scale),
+                Math.round(root.getPaddingRight() * scale),
+                Math.round(root.getPaddingBottom() * scale));
+    }
+
     // ==== Dipanggil dari CompositeSceneVideoSource.drawLayers(), TIAP FRAME draw-loop ====
 
     /** Render (atau ambil dari cache kalau belum ada chat baru) daftar chat terbaru, ukuran w x h. */
@@ -272,31 +327,25 @@ public class TikTokChatBus {
             container.setGravity(Gravity.TOP);
             container.setLayoutParams(new ViewGroup.LayoutParams(targetW, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+            // Auto-scale:
+            float scaleW = targetW / CHAT_BASE_REF_W;
+            float scaleH = targetH / CHAT_BASE_REF_H;
+            float chatScale = (float) Math.sqrt(scaleW * scaleH);
+            chatScale = Math.max(CHAT_SCALE_MIN, Math.min(chatScale, CHAT_SCALE_MAX));
+
             LayoutInflater inflater = LayoutInflater.from(themeContext);
             for (ChatEntry entry : snapshot) {
                 View view = inflater.inflate(R.layout.item_chat_bubble_boxed, container, false);
                 TextView tvUser = view.findViewById(R.id.tv_username);
                 TextView tvMsg = view.findViewById(R.id.tv_message);
+                View bubbleContainer = view.findViewById(R.id.chat_bubble_container);
                 if (tvUser != null) tvUser.setText(entry.user);
                 if (tvMsg != null) tvMsg.setText(entry.message);
+                applyChatBubbleScale(view, tvUser, tvMsg, bubbleContainer, chatScale);
                 container.addView(view);
             }
 
-            // FIX CHAT KEPOTONG:
-            // targetH. LinearLayout non-weighted mengukur tiap child dengan SISA ruang
-            // (mode AT_MOST) yang makin menyusut seiring banyaknya child sebelumnya -
-            // begitu total tinggi bubble melebihi targetH, child TERAKHIR (chat TERBARU,
-            // karena di-addLast lalu di-iterate urut lama->baru) kebagian sisa ruang
-            // AT_MOST yang nyaris 0, jadi bubble-nya "diperas" sampai nyaris tak
-            // kelihatan/kepotong - padahal justru chat terbaru itu yang paling penting
-            // buat selalu tampil.
-            //
-            // Sekarang: ukur container dengan height UNSPECIFIED supaya SEMUA bubble
-            // dapat tinggi alami (wrap_content) tanpa diperas. Kalau total tinggi hasil
-            // ukur > targetH, geser canvas ke ATAS (translate negatif) sejumlah
-            // kelebihannya sebelum digambar, dibungkus clipRect seluas layer - efeknya
-            // cuma bubble PALING LAMA yang kepotong di bagian atas (di luar clip),
-            // sedangkan chat terbaru di bagian bawah selalu utuh & selalu terlihat.
+            // FIX CHAT KEPOTONG
             int unspecHeightSpec = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
             container.measure(View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
                     unspecHeightSpec);
@@ -309,6 +358,8 @@ public class TikTokChatBus {
             container.draw(canvas);
             canvas.restore();
 
+            // Gambar selesai - baru sekarang buffer ini "sah" jadi front, di-swap di dalam lock
+            // yang sama dipakai render thread supaya tidak pernah kebaca separuh-jadi.
             synchronized (chatLock) {
                 cachedChatW = targetW;
                 cachedChatH = targetH;
