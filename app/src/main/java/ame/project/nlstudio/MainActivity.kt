@@ -360,10 +360,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Tambah 1 layer baru ke scene yang lagi diedit & refresh kanvas. */
-    private fun addLayer(type: LayerType, uri: String, w: Float, h: Float) {
-        // BATASAN: Music layer hanya boleh ada 1 per scene
-        if (type == LayerType.MUSIC) {
-            editingLayers.removeAll { it.type == LayerType.MUSIC }
+    private fun addLayer(type: LayerType, uri: String, w: Float, h: Float, x: Float = 0.3f, y: Float = 0.3f) {
+        // Restricted types: only one instance allowed per scene
+        val restrictedTypes = listOf(
+            LayerType.MUSIC,
+            LayerType.VOICE_ANIM,
+            LayerType.TIKTOK_CHAT,
+            LayerType.TIKTOK_GIFT,
+            LayerType.TIKTOK_JOIN,
+            LayerType.MUSIC_CURRENT,
+            LayerType.MUSIC_QUEUE
+        )
+
+        if (type in restrictedTypes) {
+            editingLayers.removeAll { it.type == type }
         }
 
         val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
@@ -371,7 +381,7 @@ class MainActivity : AppCompatActivity() {
             id = UUID.randomUUID().toString(),
             type = type,
             uri = uri,
-            x = 0.3f, y = 0.3f, w = w, h = h,
+            x = x, y = y, w = w, h = h,
             zIndex = nextZ
         )
         editingLayers.add(newLayer)
@@ -831,20 +841,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showAddVoiceAnimOptions() {
-        // Just add a Voice Animation layer using the current default config
-        val prefs = getSharedPreferences("voice_anim_prefs", Context.MODE_PRIVATE)
-        val configJson = prefs.getString("default_config", "") ?: ""
-
-        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
-        val newLayer = SceneLayer(
-            id = UUID.randomUUID().toString(),
-            type = LayerType.VOICE_ANIM,
-            uri = "voiceanim:default",
-            x = 0.3f, y = 0.3f, w = 0.35f, h = 0.35f,
-            zIndex = nextZ
-        )
-        editingLayers.add(newLayer)
-        refreshCanvasLayers()
+        addLayer(LayerType.VOICE_ANIM, "voiceanim:default", 0.35f, 0.35f)
         Toast.makeText(this, "Voice Animation ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
@@ -905,72 +902,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addTikTokChatLayer() {
-        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
-        val newLayer = SceneLayer(
-            id = UUID.randomUUID().toString(),
-            type = LayerType.TIKTOK_CHAT,
-            uri = "tiktok:chat",
-            x = 0.1f, y = 0.7f, w = 0.8f, h = 0.25f,
-            zIndex = nextZ
-        )
-        editingLayers.add(newLayer)
-        refreshCanvasLayers()
+        addLayer(LayerType.TIKTOK_CHAT, "tiktok:chat", 0.8f, 0.25f, 0.1f, 0.7f)
         Toast.makeText(this, "TikTok Chat ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
     private fun addTikTokGiftLayer() {
-        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
-        val newLayer = SceneLayer(
-            id = UUID.randomUUID().toString(),
-            type = LayerType.TIKTOK_GIFT,
-            uri = "tiktok:gift",
-            x = 0.1f, y = 0.1f, w = 0.8f, h = 0.25f,
-            zIndex = nextZ
-        )
-        editingLayers.add(newLayer)
-        refreshCanvasLayers()
+        addLayer(LayerType.TIKTOK_GIFT, "tiktok:gift", 0.8f, 0.25f, 0.1f, 0.1f)
         Toast.makeText(this, "TikTok Gift ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
     private fun addTikTokJoinLayer() {
-        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
-        val newLayer = SceneLayer(
-            id = UUID.randomUUID().toString(),
-            type = LayerType.TIKTOK_JOIN,
-            uri = "tiktok:join",
-            x = 0.1f, y = 0.4f, w = 0.8f, h = 0.2f,
-            zIndex = nextZ
-        )
-        editingLayers.add(newLayer)
-        refreshCanvasLayers()
+        addLayer(LayerType.TIKTOK_JOIN, "tiktok:join", 0.8f, 0.2f, 0.1f, 0.4f)
         Toast.makeText(this, "TikTok Join ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
     private fun addMusicCurrentLayer() {
-        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
-        val newLayer = SceneLayer(
-            id = UUID.randomUUID().toString(),
-            type = LayerType.MUSIC_CURRENT,
-            uri = "music:current",
-            x = 0.1f, y = 0.1f, w = 0.8f, h = 0.2f,
-            zIndex = nextZ
-        )
-        editingLayers.add(newLayer)
-        refreshCanvasLayers()
+        addLayer(LayerType.MUSIC_CURRENT, "music:current", 0.8f, 0.2f, 0.1f, 0.1f)
         Toast.makeText(this, "Music Current ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
     private fun addMusicQueueLayer() {
-        val nextZ = (editingLayers.maxOfOrNull { it.zIndex } ?: 0) + 1
-        val newLayer = SceneLayer(
-            id = UUID.randomUUID().toString(),
-            type = LayerType.MUSIC_QUEUE,
-            uri = "music:queue",
-            x = 0.1f, y = 0.4f, w = 0.8f, h = 0.5f,
-            zIndex = nextZ
-        )
-        editingLayers.add(newLayer)
-        refreshCanvasLayers()
+        addLayer(LayerType.MUSIC_QUEUE, "music:queue", 0.8f, 0.5f, 0.1f, 0.4f)
         Toast.makeText(this, "Music Queue ditambahkan", Toast.LENGTH_SHORT).show()
     }
 

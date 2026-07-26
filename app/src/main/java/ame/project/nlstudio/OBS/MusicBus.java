@@ -34,6 +34,13 @@ public class MusicBus {
     private String queueJson;
     private volatile boolean queueDirty = false;
 
+    private static final float MUSIC_BASE_REF_W = 864f;
+    private static final float MUSIC_BASE_REF_H = 240f;
+    private static final float QUEUE_BASE_REF_W = 864f;
+    private static final float QUEUE_BASE_REF_H = 600f;
+    private static final float SCALE_MIN = 0.35f;
+    private static final float SCALE_MAX = 2.2f;
+
     private Bitmap cachedCurrentBitmap;
     private int cachedCurrentW = -1, cachedCurrentH = -1;
 
@@ -41,8 +48,6 @@ public class MusicBus {
     private int cachedQueueW = -1, cachedQueueH = -1;
     private String lastQueueJsonRendered;
 
-    private View cachedCurrentView;
-    private String lastViewJson;
     private float currentRotation = 0f;
     private long lastRenderTime = 0;
 
@@ -111,6 +116,91 @@ public class MusicBus {
         });
     }
 
+    private void applyMusicScale(View root, TextView tvTitle, TextView tvChannel, TextView tvReq, ImageView ivThumb, float scale) {
+        if (tvTitle != null) tvTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvTitle.getTextSize() * scale);
+        if (tvChannel != null) tvChannel.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvChannel.getTextSize() * scale);
+        if (tvReq != null) {
+            tvReq.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvReq.getTextSize() * scale);
+            if (tvReq.getLayoutParams() instanceof ViewGroup.MarginLayoutParams lp) {
+                lp.topMargin = Math.round(lp.topMargin * scale);
+                tvReq.setLayoutParams(lp);
+            }
+        }
+        if (ivThumb != null) {
+            ViewGroup.LayoutParams lp = ivThumb.getLayoutParams();
+            if (lp != null) {
+                lp.width = Math.round(lp.width * scale);
+                lp.height = Math.round(lp.height * scale);
+                if (lp instanceof ViewGroup.MarginLayoutParams mlp) {
+                    mlp.setMarginStart(Math.round(mlp.getMarginStart() * scale));
+                    mlp.setMarginEnd(Math.round(mlp.getMarginEnd() * scale));
+                }
+                ivThumb.setLayoutParams(lp);
+            }
+        }
+        root.setPadding(
+                Math.round(root.getPaddingLeft() * scale),
+                Math.round(root.getPaddingTop() * scale),
+                Math.round(root.getPaddingRight() * scale),
+                Math.round(root.getPaddingBottom() * scale));
+    }
+
+    private void applyQueueScale(View root, float scale) {
+        root.setPadding(
+                Math.round(root.getPaddingLeft() * scale),
+                Math.round(root.getPaddingTop() * scale),
+                Math.round(root.getPaddingRight() * scale),
+                Math.round(root.getPaddingBottom() * scale));
+        
+        // Scale title "MUSIC QUEUE"
+        for (int i = 0; i < ((ViewGroup)root).getChildCount(); i++) {
+            View child = ((ViewGroup)root).getChildAt(i);
+            if (child instanceof TextView tv && !(child.getId() == R.id.queue_list_container)) {
+                tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tv.getTextSize() * scale);
+                if (tv.getLayoutParams() instanceof ViewGroup.MarginLayoutParams lp) {
+                    lp.bottomMargin = Math.round(lp.bottomMargin * scale);
+                    tv.setLayoutParams(lp);
+                }
+            }
+        }
+    }
+
+    private void applyQueueRowScale(View row, TextView tvIdx, TextView tvTitle, TextView tvReq, ImageView ivThumb, float scale) {
+        if (tvIdx != null) {
+            tvIdx.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvIdx.getTextSize() * scale);
+            ViewGroup.LayoutParams lp = tvIdx.getLayoutParams();
+            if (lp != null) {
+                lp.width = Math.round(lp.width * scale);
+                tvIdx.setLayoutParams(lp);
+            }
+        }
+        if (tvTitle != null) tvTitle.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvTitle.getTextSize() * scale);
+        if (tvReq != null) {
+            tvReq.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvReq.getTextSize() * scale);
+            if (tvReq.getLayoutParams() instanceof ViewGroup.MarginLayoutParams) {
+                ViewGroup.MarginLayoutParams lp = (ViewGroup.MarginLayoutParams) tvReq.getLayoutParams();
+                lp.setMarginStart(Math.round(lp.getMarginStart() * scale));
+                tvReq.setLayoutParams(lp);
+            }
+        }
+        if (ivThumb != null) {
+            ViewGroup.LayoutParams lp = ivThumb.getLayoutParams();
+            if (lp != null) {
+                lp.width = Math.round(lp.width * scale);
+                lp.height = Math.round(lp.height * scale);
+                if (lp instanceof ViewGroup.MarginLayoutParams mlp) {
+                    mlp.setMarginStart(Math.round(mlp.getMarginStart() * scale));
+                }
+                ivThumb.setLayoutParams(lp);
+            }
+        }
+        row.setPadding(
+                Math.round(row.getPaddingLeft() * scale),
+                Math.round(row.getPaddingTop() * scale),
+                Math.round(row.getPaddingRight() * scale),
+                Math.round(row.getPaddingBottom() * scale));
+    }
+
     public Bitmap renderCurrentSong(Context context, int w, int h) {
         if (w <= 0 || h <= 0 || currentSongJson == null) {
             lastRenderTime = 0;
@@ -145,16 +235,15 @@ public class MusicBus {
             String reqBy = obj.optString("requestedBy", "");
             String thumbUrl = obj.optString("thumbnail");
 
-            if (cachedCurrentView == null || !currentSongJson.equals(lastViewJson)) {
-                Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
-                cachedCurrentView = LayoutInflater.from(themeContext).inflate(R.layout.item_music_current, null);
-                lastViewJson = currentSongJson;
-            }
+            // FIX: DO NOT reuse cachedCurrentView because applyMusicScale modifies it.
+            // Compounding scale factors cause text to shrink to zero instantly.
+            Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
+            View viewToDraw = LayoutInflater.from(themeContext).inflate(R.layout.item_music_current, null);
             
-            TextView tvTitle = cachedCurrentView.findViewById(R.id.tv_music_title);
-            TextView tvChannel = cachedCurrentView.findViewById(R.id.tv_music_channel);
-            TextView tvReq = cachedCurrentView.findViewById(R.id.tv_music_requested);
-            ImageView ivThumb = cachedCurrentView.findViewById(R.id.iv_music_thumb);
+            TextView tvTitle = viewToDraw.findViewById(R.id.tv_music_title);
+            TextView tvChannel = viewToDraw.findViewById(R.id.tv_music_channel);
+            TextView tvReq = viewToDraw.findViewById(R.id.tv_music_requested);
+            ImageView ivThumb = viewToDraw.findViewById(R.id.iv_music_thumb);
 
             if (tvTitle != null) tvTitle.setText(title);
             if (tvChannel != null) tvChannel.setText(channel);
@@ -178,10 +267,18 @@ public class MusicBus {
                 }
             }
 
-            cachedCurrentView.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+            // Calculate scale
+            float scaleW = w / MUSIC_BASE_REF_W;
+            float scaleH = h / MUSIC_BASE_REF_H;
+            float musicScale = (float) Math.sqrt(scaleW * scaleH);
+            musicScale = Math.max(SCALE_MIN, Math.min(musicScale, SCALE_MAX));
+
+            applyMusicScale(viewToDraw, tvTitle, tvChannel, tvReq, ivThumb, musicScale);
+
+            viewToDraw.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
-            cachedCurrentView.layout(0, 0, w, h);
-            cachedCurrentView.draw(canvas);
+            viewToDraw.layout(0, 0, w, h);
+            viewToDraw.draw(canvas);
 
         } catch (Exception e) {
             Log.e("MusicBus", "Error rendering current song xml", e);
@@ -193,10 +290,8 @@ public class MusicBus {
     public Bitmap renderQueue(Context context, int w, int h) {
         if (w <= 0 || h <= 0 || queueJson == null) return null;
 
-        if (cachedQueueBitmap != null && cachedQueueW == w && cachedQueueH == h && queueJson.equals(lastQueueJsonRendered)) {
-            return cachedQueueBitmap;
-        }
-
+        // Note: We bypass the "same JSON" check for the bitmap cache because we want to animate.
+        // However, we still reuse the bitmap if size matches.
         if (cachedQueueBitmap == null || cachedQueueW != w || cachedQueueH != h) {
             if (cachedQueueBitmap != null) cachedQueueBitmap.recycle();
             cachedQueueBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
@@ -214,30 +309,55 @@ public class MusicBus {
             Context themeContext = new ContextThemeWrapper(context, R.style.Theme_NLStudio);
             LayoutInflater inflater = LayoutInflater.from(themeContext);
             
-            View containerView = inflater.inflate(R.layout.item_music_queue_container, null);
-            LinearLayout listContainer = containerView.findViewById(R.id.queue_list_container);
+            // FIX: DO NOT reuse containerView because applyQueueScale modifies it.
+            // Compounding scale factors cause text to shrink to zero instantly.
+            View viewToDraw = inflater.inflate(R.layout.item_music_queue_container, null);
+            LinearLayout listContainer = viewToDraw.findViewById(R.id.queue_list_container);
+
+            // Calculate scale
+            float scaleW = w / QUEUE_BASE_REF_W;
+            float scaleH = h / QUEUE_BASE_REF_H;
+            float queueScale = (float) Math.sqrt(scaleW * scaleH);
+            queueScale = Math.max(SCALE_MIN, Math.min(queueScale, SCALE_MAX));
 
             if (listContainer != null) {
-                for (int i = 0; i < Math.min(arr.length(), 8); i++) {
+                for (int i = 0; i < Math.min(arr.length(), 6); i++) {
                     JSONObject item = arr.getJSONObject(i);
                     View row = inflater.inflate(R.layout.item_music_queue_row, listContainer, false);
                     
                     TextView tvIdx = row.findViewById(R.id.tv_queue_index);
                     TextView tvTitle = row.findViewById(R.id.tv_queue_title);
                     TextView tvReq = row.findViewById(R.id.tv_queue_requester);
+                    ImageView ivThumb = row.findViewById(R.id.iv_queue_thumb);
 
                     if (tvIdx != null) tvIdx.setText((i + 1) + ".");
                     if (tvTitle != null) tvTitle.setText(item.optString("title"));
-                    if (tvReq != null) tvReq.setText(item.optString("requestedBy"));
+                    String reqBy = item.optString("requestedBy", "");
+                    if (tvReq != null) {
+                        if (!reqBy.isEmpty()) tvReq.setText("Requested by " + reqBy);
+                        else tvReq.setVisibility(View.GONE);
+                    }
                     
+                    if (ivThumb != null) {
+                        String thumbUrl = item.optString("thumbnail");
+                        if (thumbUrl != null && !thumbUrl.isEmpty()) {
+                            Bitmap thumb;
+                            synchronized (thumbCache) { thumb = thumbCache.get(thumbUrl); }
+                            if (thumb != null) ivThumb.setImageBitmap(thumb);
+                        }
+                    }
+                    
+                    applyQueueRowScale(row, tvIdx, tvTitle, tvReq, ivThumb, queueScale);
                     listContainer.addView(row);
                 }
             }
 
-            containerView.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+            applyQueueScale(viewToDraw, queueScale);
+
+            viewToDraw.measure(View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
-            containerView.layout(0, 0, w, h);
-            containerView.draw(canvas);
+            viewToDraw.layout(0, 0, w, h);
+            viewToDraw.draw(canvas);
 
         } catch (Exception e) {
             Log.e("MusicBus", "Error rendering queue xml", e);
@@ -252,8 +372,6 @@ public class MusicBus {
             queueJson = null;
             queueDirty = true;
             lastQueueJsonRendered = null;
-            cachedCurrentView = null;
-            lastViewJson = null;
             currentRotation = 0f;
             lastRenderTime = 0;
             if (cachedCurrentBitmap != null) {

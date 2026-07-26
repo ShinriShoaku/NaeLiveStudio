@@ -64,6 +64,12 @@ public class TikTokChatBus {
     private static final float CHAT_SCALE_MIN = 0.55f;
     private static final float CHAT_SCALE_MAX = 2.2f;
 
+    private static final float GIFT_BASE_REF_W = 864f;
+    private static final float GIFT_BASE_REF_H = 480f;
+
+    private static final float JOIN_BASE_REF_W = 864f;
+    private static final float JOIN_BASE_REF_H = 160f;
+
     public static class ChatEntry {
         public final String user;
         public final String message;
@@ -77,7 +83,9 @@ public class TikTokChatBus {
     private final Object chatLock = new Object();
     private volatile boolean chatDirty = true;
     private final Object giftLock = new Object();
+    private volatile boolean giftDirty = false;
     private final Object joinLock = new Object();
+    private volatile boolean joinDirty = false;
 
     private volatile String lastGiftUser;
     private volatile String lastGiftName;
@@ -147,6 +155,7 @@ public class TikTokChatBus {
     }
 
     public void onUserJoined(String user, String profileUrl) {
+        android.util.Log.d("TikTokChatBus", "onUserJoined: user=" + user + ", profileUrl=" + profileUrl);
         lastJoinUser = user;
         lastJoinProfileUrl = profileUrl;
         lastJoinTimestamp = System.currentTimeMillis();
@@ -167,17 +176,52 @@ public class TikTokChatBus {
     }
 
     private void preloadImage(String url) {
-        if (url == null || url.isEmpty() || imageCache.containsKey(url)) return;
+        if (url == null || url.isEmpty()) {
+            android.util.Log.w("TikTokChatBus", "preloadImage: url is null or empty");
+            return;
+        }
+        if (imageCache.containsKey(url)) {
+            android.util.Log.d("TikTokChatBus", "preloadImage: url already in cache: " + url);
+            return;
+        }
         imageLoaderExecutor.execute(() -> {
+            java.net.HttpURLConnection connection = null;
             try {
-                Bitmap bmp = android.graphics.BitmapFactory.decodeStream(new URL(url).openStream());
-                if (bmp != null) {
-                    synchronized (imageCache) {
-                        imageCache.put(url, bmp);
+                android.util.Log.d("TikTokChatBus", "preloadImage: START loading: " + url);
+                java.net.URL imageUrl = new java.net.URL(url);
+                connection = (java.net.HttpURLConnection) imageUrl.openConnection();
+                connection.setDoInput(true);
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(15000);
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36");
+                
+                android.util.Log.d("TikTokChatBus", "preloadImage: connecting...");
+                int responseCode = connection.getResponseCode();
+                android.util.Log.d("TikTokChatBus", "preloadImage: HTTP response code: " + responseCode);
+                
+                if (responseCode == java.net.HttpURLConnection.HTTP_OK) {
+                    try (java.io.InputStream input = connection.getInputStream()) {
+                        Bitmap bmp = android.graphics.BitmapFactory.decodeStream(input);
+                        if (bmp != null) {
+                            synchronized (imageCache) {
+                                imageCache.put(url, bmp);
+                            }
+                            joinDirty = true;
+                            giftDirty = true;
+                            android.util.Log.d("TikTokChatBus", "preloadImage: SUCCESS: " + url + " (" + bmp.getWidth() + "x" + bmp.getHeight() + ")");
+                        } else {
+                            android.util.Log.e("TikTokChatBus", "preloadImage: DECODE FAILED (null bitmap) for url: " + url);
+                        }
                     }
+                } else {
+                    android.util.Log.e("TikTokChatBus", "preloadImage: SERVER ERROR: " + responseCode + " for url: " + url);
                 }
-            } catch (Exception e) {
-                android.util.Log.e("TikTokChatBus", "Failed to load image: " + url, e);
+            } catch (Throwable t) {
+                android.util.Log.e("TikTokChatBus", "preloadImage: CRITICAL ERROR for url: " + url, t);
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
             }
         });
     }
@@ -214,6 +258,7 @@ public class TikTokChatBus {
             lastGiftUser = null;
             lastGiftTimestamp = 0L;
             lastGiftRenderedTs = -1;
+            giftDirty = true;
             for (int i = 0; i < giftBitmaps.length; i++) {
                 if (giftBitmaps[i] != null && !giftBitmaps[i].isRecycled()) giftBitmaps[i].recycle();
                 giftBitmaps[i] = null;
@@ -226,6 +271,7 @@ public class TikTokChatBus {
             lastJoinUser = null;
             lastJoinTimestamp = 0L;
             lastJoinRenderedTs = -1;
+            joinDirty = true;
             for (int i = 0; i < joinBitmaps.length; i++) {
                 if (joinBitmaps[i] != null && !joinBitmaps[i].isRecycled()) joinBitmaps[i].recycle();
                 joinBitmaps[i] = null;
@@ -273,6 +319,52 @@ public class TikTokChatBus {
                     Math.round(bubbleContainer.getPaddingTop() * scale),
                     Math.round(bubbleContainer.getPaddingRight() * scale),
                     Math.round(bubbleContainer.getPaddingBottom() * scale));
+        }
+        root.setPadding(
+                Math.round(root.getPaddingLeft() * scale),
+                Math.round(root.getPaddingTop() * scale),
+                Math.round(root.getPaddingRight() * scale),
+                Math.round(root.getPaddingBottom() * scale));
+    }
+
+    private void applyGiftScale(View root, TextView tvUser, TextView tvAction, ImageView ivGift, float scale) {
+        if (tvUser != null) tvUser.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvUser.getTextSize() * scale);
+        if (tvAction != null) tvAction.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvAction.getTextSize() * scale);
+        if (ivGift != null) {
+            ViewGroup.LayoutParams lp = ivGift.getLayoutParams();
+            if (lp != null) {
+                lp.width = Math.round(lp.width * scale);
+                lp.height = Math.round(lp.height * scale);
+                if (lp instanceof ViewGroup.MarginLayoutParams) {
+                    ((ViewGroup.MarginLayoutParams) lp).rightMargin = Math.round(((ViewGroup.MarginLayoutParams) lp).rightMargin * scale);
+                }
+                ivGift.setLayoutParams(lp);
+            }
+        }
+        root.setPadding(
+                Math.round(root.getPaddingLeft() * scale),
+                Math.round(root.getPaddingTop() * scale),
+                Math.round(root.getPaddingRight() * scale),
+                Math.round(root.getPaddingBottom() * scale));
+    }
+
+    private void applyJoinScale(View root, TextView tvUser, ImageView ivJoin, float scale) {
+        android.util.Log.d("TikTokChatBus", "applyJoinScale: scale=" + scale);
+        if (tvUser != null) {
+            tvUser.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, tvUser.getTextSize() * scale);
+            if (tvUser.getLayoutParams() instanceof ViewGroup.MarginLayoutParams lp) {
+                lp.setMarginStart(Math.round(lp.getMarginStart() * scale));
+                lp.setMarginEnd(Math.round(lp.getMarginEnd() * scale));
+                tvUser.setLayoutParams(lp);
+            }
+        }
+        if (ivJoin != null) {
+            ViewGroup.LayoutParams lp = ivJoin.getLayoutParams();
+            if (lp != null) {
+                lp.width = Math.round(lp.width * scale);
+                lp.height = Math.round(lp.height * scale);
+                ivJoin.setLayoutParams(lp);
+            }
         }
         root.setPadding(
                 Math.round(root.getPaddingLeft() * scale),
@@ -382,10 +474,11 @@ public class TikTokChatBus {
 
         synchronized (giftLock) {
             Bitmap front = giftBitmaps[giftFrontIndex];
-            if (front != null && !front.isRecycled() && cachedGiftW == w && cachedGiftH == h
+            if (!giftDirty && front != null && !front.isRecycled() && cachedGiftW == w && cachedGiftH == h
                     && lastGiftRenderedTs == lastGiftTimestamp) {
                 return front;
             }
+            giftDirty = false;
         }
 
         int backIndex = 1 - giftFrontIndex;
@@ -420,6 +513,12 @@ public class TikTokChatBus {
             TextView tvAction = view.findViewById(R.id.tiktok_notif_action);
             ImageView ivGift = view.findViewById(R.id.tiktok_notif_image);
 
+            // Calculate scale
+            float scaleW = targetW / GIFT_BASE_REF_W;
+            float scaleH = targetH / GIFT_BASE_REF_H;
+            float giftScale = (float) Math.sqrt(scaleW * scaleH);
+            giftScale = Math.max(CHAT_SCALE_MIN, Math.min(giftScale, CHAT_SCALE_MAX));
+
             if (tvUser != null) tvUser.setText(user);
             if (tvAction != null) tvAction.setText(giftName + " x" + giftCount);
             if (ivGift != null) {
@@ -435,6 +534,8 @@ public class TikTokChatBus {
                     }
                 }
             }
+
+            applyGiftScale(view, tvUser, tvAction, ivGift, giftScale);
 
             view.measure(View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
@@ -462,10 +563,11 @@ public class TikTokChatBus {
 
         synchronized (joinLock) {
             Bitmap front = joinBitmaps[joinFrontIndex];
-            if (front != null && !front.isRecycled() && cachedJoinW == w && cachedJoinH == h
+            if (!joinDirty && front != null && !front.isRecycled() && cachedJoinW == w && cachedJoinH == h
                     && lastJoinRenderedTs == lastJoinTimestamp) {
                 return front;
             }
+            joinDirty = false;
         }
 
         int backIndex = 1 - joinFrontIndex;
@@ -498,6 +600,12 @@ public class TikTokChatBus {
                 TextView tvUser = view.findViewById(R.id.join_user_text);
                 ImageView ivJoin = view.findViewById(R.id.join_user_image);
 
+                // Calculate scale
+                float scaleW = targetW / JOIN_BASE_REF_W;
+                float scaleH = targetH / JOIN_BASE_REF_H;
+                float joinScale = (float) Math.sqrt(scaleW * scaleH);
+                joinScale = Math.max(CHAT_SCALE_MIN, Math.min(joinScale, CHAT_SCALE_MAX));
+
                 if (tvUser != null) {
                     tvUser.setText(user + " joined");
                 } else {
@@ -507,8 +615,10 @@ public class TikTokChatBus {
                 if (ivJoin != null) {
                     Bitmap profileBmp = getCachedImage(profileUrl);
                     if (profileBmp != null) {
+                        android.util.Log.d("TikTokChatBus", "renderJoinOverlay: setting profile bitmap for " + user);
                         ivJoin.setImageBitmap(profileBmp);
                     } else {
+                        android.util.Log.w("TikTokChatBus", "renderJoinOverlay: profile bitmap NOT in cache for " + profileUrl);
                         int resId = context.getResources().getIdentifier("kanae", "drawable", context.getPackageName());
                         if (resId != 0) {
                             ivJoin.setImageResource(resId);
@@ -517,6 +627,8 @@ public class TikTokChatBus {
                         }
                     }
                 }
+
+                applyJoinScale(view, tvUser, ivJoin, joinScale);
 
                 view.measure(View.MeasureSpec.makeMeasureSpec(targetW, View.MeasureSpec.EXACTLY),
                         View.MeasureSpec.makeMeasureSpec(targetH, View.MeasureSpec.EXACTLY));
