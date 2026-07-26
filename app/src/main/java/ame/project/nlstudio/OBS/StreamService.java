@@ -78,8 +78,6 @@ import java.util.Locale;
  *     (ScreenSource), gambar statis, atau video file, tanpa memutus koneksi RTMP dan
  *     tanpa minta izin screen-capture ulang (MediaProjection disimpan & dipakai lagi).
  *
- * Catatan: nama/parameter method di RootEncoder bisa berubah antar versi.
- * Contoh resmi: https://github.com/pedroSG94/RootEncoder/tree/master/app/src/main/java/com/pedro/streamer/screen
  */
 public class StreamService extends Service implements ConnectChecker {
 
@@ -88,11 +86,6 @@ public class StreamService extends Service implements ConnectChecker {
     private static StreamService instance;
     public static StreamService getInstance() { return instance; }
 
-    // Global Screen Capture (Android 14 fix)
-    // Di Android 14+, satu MediaProjection hanya bisa dipakai createVirtualDisplay satu kali.
-    // Jika kita ganti scene dengan membuat VideoSource baru yang panggil createVirtualDisplay lagi,
-    // maka akan gagal (SecurityException). Solusinya: capture layar secara global di Service ini
-    // satu kali saja, lalu hasilnya (Bitmap) dibagikan ke scene manapun yang butuh.
     private VirtualDisplay globalVirtualDisplay;
     private ImageReader globalImageReader;
     private HandlerThread globalScreenThread;
@@ -112,8 +105,8 @@ public class StreamService extends Service implements ConnectChecker {
     private String lastSceneTypeBeforeAfk = null;
     private String lastSceneJsonBeforeAfk = null;
     private long currentBitrateBps = 0;
-    private long afkEnteredAtMs = 0L;                 // FIX: kapan masuk AFK, buat safety timeout
-    private int consecutiveCacheCheckErrors = 0;      // FIX: hitung error beruntun baca cache
+    private long afkEnteredAtMs = 0L;
+    private int consecutiveCacheCheckErrors = 0;
     private final Handler afkHandler = new Handler(Looper.getMainLooper());
     private final Runnable afkCheckRunnable = new Runnable() {
         @Override
@@ -238,9 +231,9 @@ public class StreamService extends Service implements ConnectChecker {
     public static final String EXTRA_SCENE_URI = "sceneUri";
     public static final String EXTRA_SCENE_JSON = "sceneJson";
     public static final String SCENE_SCREEN = "scene_screen";
-    public static final String SCENE_IMAGE = "scene_image";     // dipertahankan buat kompatibilitas lama
-    public static final String SCENE_VIDEO = "scene_video";     // dipertahankan buat kompatibilitas lama
-    public static final String SCENE_COMPOSITE = "scene_composite"; // scene ala OBS: background + layer2
+    public static final String SCENE_IMAGE = "scene_image";
+    public static final String SCENE_VIDEO = "scene_video";
+    public static final String SCENE_COMPOSITE = "scene_composite";
 
     // audioSourceIndex == ini artinya pakai AudioMixSource (volume mic & sistem terpisah)
     public static final int AUDIO_MODE_MANUAL_MIXER = 4;
@@ -254,10 +247,6 @@ public class StreamService extends Service implements ConnectChecker {
     private RtmpStream rtmpStream;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean isTestRecording = false;
-    // FIX: dulu export ke Gallery cuma kejadian lewat callback auto-timer 30 detik
-    // (finishTestRecord()). Sekarang limitnya dihapus (lihat startTestRecord()), jadi
-    // satu-satunya cara berhenti rekam adalah tombol Stop manual - field ini nyimpen info
-    // rekaman yang lagi jalan supaya stopEverything() bisa export-nya ke Gallery juga.
     private String activeTestRecordPath;
     private String activeTestRecordEncoderLabel;
     private int activeTestRecordWidth;
@@ -634,16 +623,7 @@ public class StreamService extends Service implements ConnectChecker {
             }
 
             // Safety check: resolusi video wajib genap untuk encoder (H.264/H.265).
-            // FIX: genap aja ternyata TIDAK CUKUP di sebagian hardware encoder. H.264 bekerja per
-            // MACROBLOCK 16x16 piksel - kalau width/height tidak habis dibagi 16 (mis. 1528, cuma
-            // habis dibagi 8), sebagian chip encoder diam-diam alokasi buffer internal dibulatkan
-            // ke atas ke kelipatan 16 (mis. 1536), lalu crop-rect/stride yang dilaporkan balik ke
-            // Surface kita jadi tidak konsisten dengan apa yang kita gambar di Canvas -> muncul
-            // sebagai pita/band + bar hitam (PERSIS gejala yang muncul di scene composite kita,
-            // yang render manual via Canvas->Surface, beda dari ScreenSource/VirtualDisplay yang
-            // agaknya sudah handle alignment ini sendiri secara internal).
-            // Makanya sekarang dibulatkan ke KELIPATAN 16 dulu (bukan cuma genap), searah ke bawah
-            // biar tidak pernah melebihi resolusi asli layar.
+
             int originalWidth = width;
             int originalHeight = height;
             width -= (width % 16);
@@ -726,13 +706,7 @@ public class StreamService extends Service implements ConnectChecker {
 
         applyEncoderType(encoderType);
 
-        // KOREKSI: analisa sebelumnya SALAH. RtmpStream (extends StreamBase, BUKAN Camera2Base)
-        // punya urutan parameter beda dari RtmpCamera2. Berdasarkan log RES-COMP setelah dicoba
-        // (create() melaporkan fps=2.560.000 setelah argumen ditukar -> itu nilai vBitrate kita,
-        // berarti urutan yg BENAR utk RtmpStream/StreamBase adalah:
-        //   prepareVideo(width, height, bitrate, fps, iFrameInterval, rotation=0 default)
-        // Jadi panggilan ASLI (width, height, vBitrate, fps, 2) itu SUDAH BENAR - "2" adalah
-        // iFrameInterval (keyframe tiap 2 detik), BUKAN rotation. Dikembalikan ke bentuk semula.
+        // KOREKSI: sebelumnya SALAH. RtmpStream (extends StreamBase, BUKAN Camera2Base)
         Log.d(TAG, "startStreaming: MEMANGGIL rtmpStream.prepareVideo(width=" + width
                 + ", height=" + height + ", bitrate=" + vBitrate + ", fps=" + fps
                 + ", iFrameInterval=2) <- dikembalikan ke urutan asli, ini yg benar utk RtmpStream");
