@@ -112,6 +112,8 @@ public class StreamService extends Service implements ConnectChecker {
     private String lastSceneTypeBeforeAfk = null;
     private String lastSceneJsonBeforeAfk = null;
     private long currentBitrateBps = 0;
+    private long afkEnteredAtMs = 0L;                 // FIX: kapan masuk AFK, buat safety timeout
+    private int consecutiveCacheCheckErrors = 0;      // FIX: hitung error beruntun baca cache
     private final Handler afkHandler = new Handler(Looper.getMainLooper());
     private final Runnable afkCheckRunnable = new Runnable() {
         @Override
@@ -1525,6 +1527,15 @@ public class StreamService extends Service implements ConnectChecker {
     public void onConnectionSuccess() {
         retryCount = 0;
         sendStatusBroadcast("Live Streaming Aktif");
+
+        // FIX: jangan cuma andalkan itemsInCache buat exit AFK. Begitu reconnect sukses
+        // (sinyal RTMP-nya sendiri bilang OK), langsung cek & keluar dari AFK kalau memang
+        // lagi aktif — jangan nunggu cache turun ke bawah 30 di polling berikutnya, karena
+        // itu yang bikin "kadang stuck" walau sinyal udah bagus.
+        if (isAfkActive) {
+            Log.i(TAG, "onConnectionSuccess: koneksi pulih, keluar dari AFK mode.");
+            exitAfkMode();
+        }
     }
 
     @Override
@@ -1562,6 +1573,7 @@ public class StreamService extends Service implements ConnectChecker {
         try {
             // Monitor antrian data (cache) di stream client
             int itemsInCache = rtmpStream.getStreamClient().getItemsInCache();
+            consecutiveCacheCheckErrors = 0; // baca sukses, reset counter error
 
             // Threshold: 150 frame (~5 detik delay di 30fps)
             if (!isAfkActive && itemsInCache > 150) {
@@ -1570,6 +1582,15 @@ public class StreamService extends Service implements ConnectChecker {
             } else if (isAfkActive && itemsInCache < 30) {
                 Log.i(TAG, "Network recovered. Cache=" + itemsInCache + ". Exiting AFK Mode.");
                 exitAfkMode();
+            } else if (isAfkActive
+                    && System.currentTimeMillis() - afkEnteredAtMs > 15000
+                    && itemsInCache < 150) {
+                // FIX: safety-net. Kalau udah lebih dari 15 detik di AFK dan cache-nya sendiri
+                // sudah nggak menumpuk lagi (di bawah threshold masuk AFK), anggap sinyal sudah
+                // pulih meski belum turun sampai di bawah 30. Ini nyegah stuck permanen kalau
+                // cache-nya "nyangkut" di angka 30-150 padahal koneksi sebenarnya udah sehat.
+                Log.i(TAG, "Network recovered (safety timeout). Cache=" + itemsInCache + ". Exiting AFK Mode.");
+                exitAfkMode();
             }
 
             if (isAfkActive) {
@@ -1577,11 +1598,21 @@ public class StreamService extends Service implements ConnectChecker {
             }
         } catch (Exception e) {
             Log.e(TAG, "Error checking network health", e);
+            consecutiveCacheCheckErrors++;
+            // FIX: kalau baca cache selalu gagal (misal stream client internal-nya berubah
+            // referensi abis reconnect) padahal rtmpStream.isStreaming()==true, jangan biarkan
+            // AFK nyangkut selamanya cuma karena metode pengukurannya sendiri yang error.
+            if (isAfkActive && consecutiveCacheCheckErrors >= 5) {
+                Log.w(TAG, "checkNetworkHealth gagal " + consecutiveCacheCheckErrors + "x beruntun tapi stream masih jalan, paksa keluar AFK.");
+                exitAfkMode();
+                consecutiveCacheCheckErrors = 0;
+            }
         }
     }
 
     private void enterAfkMode() {
         isAfkActive = true;
+        afkEnteredAtMs = System.currentTimeMillis(); // FIX: dipakai buat safety timeout recovery
         // Simpan scene yang sedang aktif agar bisa dikembalikan nanti
         // Note: kita butuh tau apa scene tipenya dan JSON-nya.
         // Untuk sederhana, kita asumsikan StreamService menyimpan state scene terakhir.
