@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Kotlin-1.9%2B-purple.svg" alt="Kotlin" />
 </p>
 
-**NL Studio** adalah platform *mobile broadcasting* yang dirancang khusus untuk kreator konten di Android. Aplikasi ini menghadirkan pengalaman layaknya **OBS (Open Broadcaster Software)** ke dalam genggaman tangan, memungkinkan pengguna melakukan live streaming profesional ke berbagai platform seperti TikTok dengan fitur kustomisasi scene yang mendalam.
+**NL Studio** adalah platform *mobile broadcasting* yang dirancang khusus untuk kreator konten di Android. Aplikasi ini menghadirkan pengalaman layaknya **OBS (Open Broadcaster Software)** ke dalam genggaman tangan, memungkinkan pengguna melakukan live streaming profesional ke berbagai platform dengan kustomisasi scene yang mendalam.
 
 ---
 
@@ -24,64 +24,69 @@
 *   **🎨 OBS-style Scene Management**: Kelola berbagai *scene* dengan sistem *layer* (lapisan) yang fleksibel.
 *   **🧩 Multi-Source Overlay**: Dukungan layer untuk Capture Layar, Gambar, Video, Teks, hingga Animasi Suara.
 *   **📱 Integrasi TikTok Real-time**: Menampilkan pesan chat, gift, dan notifikasi interaksi (follow/like/share) secara langsung.
-*   **🔊 Professional Audio Mixer**: Kontrol volume Mikrofon dan Audio Sistem secara terpisah.
+*   **🔊 Professional Audio Mixer**: Kontrol volume Mikrofon dan Audio Sistem secara terpisah (Butuh Android 10+).
 *   **✨ Smooth Transitions**: Efek *cross-fade* antar scene untuk transisi yang elegan.
-*   **⚡ High-Performance Encoding**: Optimasi khusus untuk Android 14+ (API 34).
-*   **🎵 Music Integration (Kanae Service)**: Kontrol musik dan info lagu secara *real-time*.
+*   **⚡ High-Performance Encoding**: Optimasi khusus untuk encoder Hardware dan Software.
 *   **📹 Local Test Recording**: Rekam lokal untuk menguji kualitas sebelum *go live*.
+
+---
+
+## 🔗 Integrasi Aplikasi Wajib
+
+Untuk menggunakan fitur **TikTok Live Overlay** (Chat, Gift, Join) dan **Music Player** (Music Current/Queue), Anda **WAJIB** menginstal aplikasi pendamping berikut:
+
+### 🎵 [Kanae Player](https://github.com/ShinriShoaku/KanaePlayer)
+**Kanae Player** berfungsi sebagai penyedia data (Data Provider) yang akan mengirimkan informasi chat TikTok dan metadata musik ke NL Studio melalui **NL Studio SDK**. Tanpa aplikasi ini, layer TikTok dan Music di NL Studio tidak akan menampilkan data apapun.
 
 ---
 
 ## 🏗️ Arsitektur Proyek
 
-NL Studio menggunakan arsitektur modular untuk memastikan performa tinggi dan skalabilitas.
+NL Studio menggunakan arsitektur modular yang terhubung dengan ekosistem luar melalui SDK khusus.
 
-### 📐 Diagram Alur
+### 📐 Diagram Arsitektur
 
 ```mermaid
 graph TD
-    subgraph "UI Layer"
-        A[App Module]
-        C[Scene Editor]
-    end
-
-    subgraph "Core Engine"
+    subgraph "NL Studio (App)"
+        A[MainActivity / UI]
         B[StreamService]
-        D[CompositeSceneVideoSource]
-        E[Canvas Renderer]
+        C[CompositeSceneVideoSource]
     end
 
-    subgraph "External Integration"
-        G[NL Studio SDK]
-        H[Kanae Service]
+    subgraph "NL Studio SDK (Library)"
+        D[AIDL Interface]
+        E[Data Bus]
+    end
+
+    subgraph "External Apps"
+        F["Kanae Player (Music & TikTok Provider)"]
     end
 
     A --> B
-    C --> B
-    B --> D
-    D --> E
-    E --> F[RTMP Stream / Encoder]
-    
-    B <--> G
-    G <--> H
+    B --> C
+    C --> D
+    D <--> F
+    F -- "Chat/Gift/Music Data" --> E
+    E --> C
 ```
 
 ### 🧩 Komponen Utama
 
-1.  **StreamService**: Jantung aplikasi (Foreground Service) yang mengelola `MediaProjection` dan siklus hidup streaming.
-2.  **CompositeSceneVideoSource**: Engine rendering kustom yang menggabungkan berbagai layer menggunakan `Canvas`.
-3.  **NL Studio SDK**: Antarmuka **AIDL** untuk komunikasi *inter-process* dengan layanan pihak ketiga.
-4.  **VideoCacheManager**: Sistem manajemen cache untuk memastikan aset video termuat secara instan.
+1.  **StreamService**: Foreground Service yang mengelola MediaProjection dan siklus hidup streaming.
+2.  **CompositeSceneVideoSource**: Engine rendering yang menggabungkan berbagai layer menggunakan Canvas/OpenGL.
+3.  **nlstudio-sdk**: Modul library yang menangani komunikasi IPC (Inter-Process Communication) menggunakan **AIDL**.
+4.  **VideoOptimizer**: Melakukan optimalisasi resolusi dan bitrate video background agar ringan saat di-decode hardware.
 
 ---
 
 ## 🛠️ Tech Stack
 
-- **Languages**: Kotlin (Utama) & Java
-- **Streaming**: [RootEncoder](https://github.com/pedroSG94/RootEncoder) (RTMP, RTSP, SRT)
-- **Graphics**: Canvas API & GLStreamInterface
-- **IPC**: AIDL for Inter-Process Communication
-- **Architecture**: MVVM + Modular
+- **Min API**: 24 (Android 7.0)
+- **Target API**: 36 (Android 15)
+- **Core Library**: [RootEncoder](https://github.com/pedroSG94/RootEncoder)
+- **UI Framework**: Android XML / Material Components
+- **Media**: Media3 / ExoPlayer untuk video background
 
 ---
 
