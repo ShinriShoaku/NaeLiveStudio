@@ -20,8 +20,9 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 
 /**
- * Custom audio source: capture MIC and INTERNAL AUDIO separately and mix them manually.
- * Fixes speed-up issues by using a fixed-size PCM pipeline and zero-filling missing data.
+ * Custom audio source: capture MIC, INTERNAL AUDIO (system/game), dan MUSIC (Kanae Player)
+ * secara terpisah lalu mix manual. Fixes speed-up issues by using a fixed-size PCM pipeline
+ * and zero-filling missing data.
  */
 public class AudioMixSource extends AudioSource {
 
@@ -33,15 +34,28 @@ public class AudioMixSource extends AudioSource {
     // Fixed frame size (e.g., 1024 samples = ~23.2ms at 44.1kHz)
     private static final int SAMPLES_PER_FRAME = 1024;
 
+    /** Package name aplikasi Kanae Player - dipakai buat resolve UID capture-nya. */
+    private static final String KANAE_PACKAGE_NAME = "ame.project.kanae";
+
     private final MediaProjection mediaProjection;
     private final int gameUid;
 
+    /** UID proses Kanae Player, di-resolve di constructor. -1 kalau nggak ketemu/nggak terpasang. */
+    private int kanaeUid = -1;
+
     private AudioRecord micRecord;
     private AudioRecord internalRecord;
+    /** AudioRecord khusus capture audio Kanae Player (scoped by UID). Null kalau kanaeUid <= 0. */
+    private AudioRecord musicRecord;
+
     private Thread captureThread;
     private Thread micCaptureThread;
     private Thread internalCaptureThread;
+    /** Thread mode capture-langsung-dari-Kanae (dipakai kalau musicRecord != null). */
+    private Thread musicCaptureThread;
+    /** Thread mode lama: decode file lokal lewat musicUri (fallback kalau Kanae nggak ada). */
     private Thread musicDecodeThread;
+
     private volatile boolean running = false;
     private volatile boolean stopMusicThread = false;
     private GetMicrophoneData callback;
@@ -70,6 +84,15 @@ public class AudioMixSource extends AudioSource {
         this.context = context;
         this.mediaProjection = mediaProjection;
         this.gameUid = gameUid;
+
+        try {
+            kanaeUid = context.getPackageManager()
+                    .getApplicationInfo(KANAE_PACKAGE_NAME, 0).uid;
+            android.util.Log.d("AudioMixSource", "Kanae Player terdeteksi, uid=" + kanaeUid + " -> bus Music pakai capture langsung.");
+        } catch (Exception e) {
+            kanaeUid = -1;
+            android.util.Log.w("AudioMixSource", "Kanae Player (" + KANAE_PACKAGE_NAME + ") tidak terpasang, bus Music fallback ke mode file lokal.");
+        }
     }
 
     public void setMicGain(float gain) {
@@ -84,7 +107,17 @@ public class AudioMixSource extends AudioSource {
         this.musicGain = Math.max(0f, Math.min(2f, gain));
     }
 
+    /**
+     * Set URI file musik lokal untuk mode FALLBACK (dipakai hanya kalau Kanae Player tidak
+     * terpasang / kanaeUid tidak berhasil di-resolve). Kalau bus Music sedang jalan dalam mode
+     * capture-Kanae, method ini sengaja di-ignore supaya kedua sumber tidak bentrok.
+     */
     public void setMusicUri(android.net.Uri uri) {
+        if (kanaeUid > 0) {
+            android.util.Log.w("AudioMixSource", "setMusicUri() diabaikan: bus Music sedang pakai capture Kanae Player.");
+            return;
+        }
+
         if (uri == null && musicUri == null) return;
         if (uri != null && uri.equals(musicUri)) return;
 
@@ -137,6 +170,12 @@ public class AudioMixSource extends AudioSource {
         }
     }
 
+    /** Enable/disable bus Music tanpa mengubah sumbernya (capture-Kanae ATAU file lokal). */
+    public void setMusicEnabled(boolean enabled) {
+        this.musicEnabled = enabled;
+        if (!enabled) musicAudioQueue.clear();
+    }
+
     @SuppressLint("MissingPermission")
     @RequiresApi(api = Build.VERSION_CODES.Q)
     private void setupRecords() {
@@ -151,6 +190,8 @@ public class AudioMixSource extends AudioSource {
                 sampleRate, AudioFormat.CHANNEL_IN_MONO, ENCODING, bufferSizeBytes
         );
 
+        // ── Bus Internal/System: audio game/lainnya. Kanae di-EXCLUDE dari sini biar nggak
+        //    ikut kehitung dobel (audio Kanae akan ditangkap sendiri lewat musicRecord). ──
         AudioPlaybackCaptureConfiguration.Builder configBuilder =
                 new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
                         .addMatchingUsage(android.media.AudioAttributes.USAGE_MEDIA)
@@ -159,6 +200,9 @@ public class AudioMixSource extends AudioSource {
 
         if (gameUid > 0) {
             configBuilder.addMatchingUid(gameUid);
+        }
+        if (kanaeUid > 0) {
+            configBuilder.excludeUid(kanaeUid);
         }
 
         internalRecord = new AudioRecord.Builder()
@@ -170,6 +214,26 @@ public class AudioMixSource extends AudioSource {
                 .setBufferSizeInBytes(bufferSizeBytes)
                 .setAudioPlaybackCaptureConfig(configBuilder.build())
                 .build();
+
+        // ── Bus Music: HANYA audio yang diputar oleh Kanae Player (di-scope by UID). ──
+        if (kanaeUid > 0) {
+            AudioPlaybackCaptureConfiguration musicConfig =
+                    new AudioPlaybackCaptureConfiguration.Builder(mediaProjection)
+                            .addMatchingUid(kanaeUid)
+                            .build();
+
+            musicRecord = new AudioRecord.Builder()
+                    .setAudioFormat(new AudioFormat.Builder()
+                            .setEncoding(ENCODING)
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(CHANNEL_IN)
+                            .build())
+                    .setBufferSizeInBytes(bufferSizeBytes)
+                    .setAudioPlaybackCaptureConfig(musicConfig)
+                    .build();
+        } else {
+            musicRecord = null;
+        }
     }
 
     @Override
@@ -189,6 +253,9 @@ public class AudioMixSource extends AudioSource {
                 setupRecords();
                 micRecord.startRecording();
                 internalRecord.startRecording();
+                if (musicRecord != null) {
+                    musicRecord.startRecording();
+                }
                 running = true;
                 stopMusicThread = false;
                 android.util.Log.i("AudioMixSource", "Records started.");
@@ -212,9 +279,15 @@ public class AudioMixSource extends AudioSource {
             internalCaptureThread.setPriority(Thread.MAX_PRIORITY);
             internalCaptureThread.start();
 
-            // 3. Thread Decode Musik
-            if (musicEnabled && musicUri != null) {
-                musicDecodeThread = new Thread(this::musicDecodeLoop, "AudioMixSource-music");
+            // 3. Thread Musik: prioritas capture langsung dari Kanae Player, fallback ke decode
+            //    file lokal cuma kalau Kanae nggak terdeteksi terpasang.
+            if (musicRecord != null) {
+                musicEnabled = true;
+                musicCaptureThread = new Thread(this::musicCaptureLoop, "AudioMixSource-music-kanae");
+                musicCaptureThread.setPriority(Thread.MAX_PRIORITY);
+                musicCaptureThread.start();
+            } else if (musicEnabled && musicUri != null) {
+                musicDecodeThread = new Thread(this::musicDecodeLoop, "AudioMixSource-music-file");
                 musicDecodeThread.start();
             }
 
@@ -234,16 +307,19 @@ public class AudioMixSource extends AudioSource {
             if (captureThread != null) captureThread.join(200);
             if (micCaptureThread != null) micCaptureThread.join(200);
             if (internalCaptureThread != null) internalCaptureThread.join(200);
+            if (musicCaptureThread != null) musicCaptureThread.join(200);
             if (musicDecodeThread != null) musicDecodeThread.join(200);
         } catch (InterruptedException ignored) {
             if (captureThread != null) captureThread.interrupt();
             if (micCaptureThread != null) micCaptureThread.interrupt();
             if (internalCaptureThread != null) internalCaptureThread.interrupt();
+            if (musicCaptureThread != null) musicCaptureThread.interrupt();
             if (musicDecodeThread != null) musicDecodeThread.interrupt();
         }
         captureThread = null;
         micCaptureThread = null;
         internalCaptureThread = null;
+        musicCaptureThread = null;
         musicDecodeThread = null;
 
         micAudioQueue.clear();
@@ -252,8 +328,10 @@ public class AudioMixSource extends AudioSource {
 
         releaseRecord(micRecord);
         releaseRecord(internalRecord);
+        releaseRecord(musicRecord);
         micRecord = null;
         internalRecord = null;
+        musicRecord = null;
         AudioLevelBus.publish(0f, 0f, 0f);
     }
 
@@ -327,6 +405,31 @@ public class AudioMixSource extends AudioSource {
         android.util.Log.d("AudioMixSource", "internalCaptureLoop finished.");
     }
 
+    /**
+     * Capture audio Kanae Player secara langsung dari OS (AudioPlaybackCaptureConfiguration
+     * scoped by UID). Ini pengganti musicDecodeLoop() untuk kasus normal - tidak ada data yang
+     * lewat AIDL sama sekali, murni tangkap PCM dari mixer audio Android.
+     */
+    private void musicCaptureLoop() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
+        int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
+        byte[] buf = new byte[bytesPerFrame];
+        android.util.Log.d("AudioMixSource", "musicCaptureLoop (Kanae) started.");
+        while (running) {
+            int read = musicRecord.read(buf, 0, bytesPerFrame);
+            if (read > 0) {
+                if (musicAudioQueue.size() >= 10) musicAudioQueue.poll();
+                musicAudioQueue.offer(java.util.Arrays.copyOf(buf, read));
+            } else if (read < 0) {
+                android.util.Log.e("AudioMixSource", "musicCaptureLoop error: " + read);
+                break;
+            } else {
+                try { Thread.sleep(10); } catch (InterruptedException e) { break; }
+            }
+        }
+        android.util.Log.d("AudioMixSource", "musicCaptureLoop finished.");
+    }
+
     private void mainCaptureLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
@@ -359,9 +462,9 @@ public class AudioMixSource extends AudioSource {
                     musicBuf != null ? musicBuf : new byte[0], musicLen);
 
             if (loopCounter % 100 == 0) {
-                android.util.Log.v("AudioMixSource", "mainCaptureLoop status: micQ=" + micAudioQueue.size() 
-                    + " sysQ=" + internalAudioQueue.size() + " musQ=" + musicAudioQueue.size() 
-                    + " micEnabled=" + micEnabled + " sysEnabled=" + internalEnabled + " musEnabled=" + musicEnabled);
+                android.util.Log.v("AudioMixSource", "mainCaptureLoop status: micQ=" + micAudioQueue.size()
+                        + " sysQ=" + internalAudioQueue.size() + " musQ=" + musicAudioQueue.size()
+                        + " micEnabled=" + micEnabled + " sysEnabled=" + internalEnabled + " musEnabled=" + musicEnabled);
             }
 
             // Jaga cadence waktu
@@ -382,7 +485,7 @@ public class AudioMixSource extends AudioSource {
         float micLevel = micEnabled ? calcRmsLevel(micBuf, micLen) * micGain : 0f;
         float systemLevel = internalEnabled ? calcRmsLevel(internalBuf, internalLen) * internalGain : 0f;
         float musicLevel = musicEnabled ? calcRmsLevel(musicBuf, musicLen) * musicGain : 0f;
-        
+
         // We need to update AudioLevelBus to support 3 channels, or pack it
         AudioLevelBus.publish(Math.min(1f, micLevel), Math.min(1f, systemLevel), Math.min(1f, musicLevel));
     }
@@ -420,6 +523,10 @@ public class AudioMixSource extends AudioSource {
         }
     }
 
+    /**
+     * Mode FALLBACK (dipakai hanya kalau Kanae Player tidak terpasang): decode file lokal lewat
+     * MediaExtractor/MediaCodec, persis fitur lama.
+     */
     private void musicDecodeLoop() {
         if (musicUri == null) return;
         android.util.Log.d("AudioMixSource", "musicDecodeLoop: Starting for URI: " + musicUri);
