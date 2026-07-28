@@ -12,7 +12,8 @@ enum class BackgroundType { SCREEN, COLOR, IMAGE, VIDEO }
 enum class LayerType {
     IMAGE, ICON, TEXT, VIDEO, SCREEN, VOICE_ANIM,
     TIKTOK_CHAT, TIKTOK_GIFT, TIKTOK_JOIN,
-    MUSIC_CURRENT, MUSIC_QUEUE, EFFECT, MUSIC
+    MUSIC_CURRENT, MUSIC_QUEUE, EFFECT, MUSIC,
+    KANAE_WEB
 }
 
 enum class AnimationEffect {

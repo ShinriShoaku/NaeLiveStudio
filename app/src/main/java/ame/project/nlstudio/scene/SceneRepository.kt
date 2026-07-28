@@ -182,8 +182,33 @@ class SceneRepository(private val context: Context) {
             LayerType.MUSIC_QUEUE -> renderMusicQueuePlaceholder()
             LayerType.MUSIC -> renderBgMusicPlaceholder(layer.uri)
             LayerType.EFFECT -> renderEffectPlaceholder(layer.uri)
+            LayerType.KANAE_WEB -> renderKanaeWebPlaceholder(layer.uri)
             else -> loadPreviewBitmap(Uri.parse(layer.uri))
         }
+    }
+
+    /**
+     * Thumbnail placeholder untuk layer KANAE_WEB di editor.
+     * uri berformat "kanae:web:<id>", nama overlay-nya di-lookup dari
+     * KanaeOverlayBridge.overlays (di-cache in-memory, sudah pasti terisi
+     * kalau Kanae Player sedang terhubung).
+     */
+    private fun renderKanaeWebPlaceholder(uri: String): Bitmap {
+        val id = uri.removePrefix("kanae:web:")
+        val name = ame.project.nlsdk.KanaeOverlayBridge.overlays.find { it.id == id }?.name ?: "Custom Web Overlay"
+        val bmp = Bitmap.createBitmap(160, 90, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(Color.parseColor("#B0000000"))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#7FD8A6")
+            textSize = 14f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("KANAE", 80f, 40f, paint)
+        paint.color = Color.CYAN
+        paint.textSize = 10f
+        canvas.drawText(name.take(20), 80f, 65f, paint)
+        return bmp
     }
 
     private fun renderTikTokJoinPlaceholder(): Bitmap {

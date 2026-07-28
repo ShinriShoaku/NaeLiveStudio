@@ -1,6 +1,6 @@
 /*
  * This file is auto-generated.  DO NOT MODIFY.
- * Using: /home/shinri/Android/Sdk/build-tools/36.0.0/aidl -p/home/shinri/Android/Sdk/platforms/android-36/framework.aidl -o/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/generated/aidl_source_output_dir/debug/out -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/debug/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/61969c6073364be09d3672c7433a7a2a/transformed/core-1.16.0/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/052b2f0d289805d19a451213a8be1c0d/transformed/versionedparcelable-1.1.1/aidl -d/tmp/aidl9987294962408047280.d /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl/ame/project/nlsdk/IKanaeCallback.aidl
+ * Using: /home/shinri/Android/Sdk/build-tools/36.0.0/aidl -p/home/shinri/Android/Sdk/platforms/android-36/framework.aidl -o/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/generated/aidl_source_output_dir/debug/out -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/debug/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/61969c6073364be09d3672c7433a7a2a/transformed/core-1.16.0/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/052b2f0d289805d19a451213a8be1c0d/transformed/versionedparcelable-1.1.1/aidl -d/tmp/aidl10040756145876536094.d /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl/ame/project/nlsdk/IKanaeCallback.aidl
  *
  * DO NOT CHECK THIS FILE INTO A CODE TREE (e.g. git, etc..).
  * ALWAYS GENERATE THIS FILE FROM UPDATED AIDL COMPILER
@@ -45,6 +45,10 @@ public interface IKanaeCallback extends android.os.IInterface
     {
     }
     @Override public void onUserShared(java.lang.String user, java.lang.String profileUrl) throws android.os.RemoteException
+    {
+    }
+    // Custom Web Overlay
+    @Override public void onCustomOverlaysChanged(java.lang.String overlaysJson) throws android.os.RemoteException
     {
     }
     @Override
@@ -207,6 +211,14 @@ public interface IKanaeCallback extends android.os.IInterface
           java.lang.String _arg1;
           _arg1 = data.readString();
           this.onUserShared(_arg0, _arg1);
+          reply.writeNoException();
+          break;
+        }
+        case TRANSACTION_onCustomOverlaysChanged:
+        {
+          java.lang.String _arg0;
+          _arg0 = data.readString();
+          this.onCustomOverlaysChanged(_arg0);
           reply.writeNoException();
           break;
         }
@@ -414,6 +426,22 @@ public interface IKanaeCallback extends android.os.IInterface
           _data.recycle();
         }
       }
+      // Custom Web Overlay
+      @Override public void onCustomOverlaysChanged(java.lang.String overlaysJson) throws android.os.RemoteException
+      {
+        android.os.Parcel _data = android.os.Parcel.obtain();
+        android.os.Parcel _reply = android.os.Parcel.obtain();
+        try {
+          _data.writeInterfaceToken(DESCRIPTOR);
+          _data.writeString(overlaysJson);
+          boolean _status = mRemote.transact(Stub.TRANSACTION_onCustomOverlaysChanged, _data, _reply, 0);
+          _reply.readException();
+        }
+        finally {
+          _reply.recycle();
+          _data.recycle();
+        }
+      }
     }
     static final int TRANSACTION_onTrackChanged = (android.os.IBinder.FIRST_CALL_TRANSACTION + 0);
     static final int TRANSACTION_onLyricsChanged = (android.os.IBinder.FIRST_CALL_TRANSACTION + 1);
@@ -426,6 +454,7 @@ public interface IKanaeCallback extends android.os.IInterface
     static final int TRANSACTION_onUserLiked = (android.os.IBinder.FIRST_CALL_TRANSACTION + 8);
     static final int TRANSACTION_onUserFollowed = (android.os.IBinder.FIRST_CALL_TRANSACTION + 9);
     static final int TRANSACTION_onUserShared = (android.os.IBinder.FIRST_CALL_TRANSACTION + 10);
+    static final int TRANSACTION_onCustomOverlaysChanged = (android.os.IBinder.FIRST_CALL_TRANSACTION + 11);
   }
   /** @hide */
   public static final java.lang.String DESCRIPTOR = "ame.project.nlsdk.IKanaeCallback";
@@ -442,4 +471,6 @@ public interface IKanaeCallback extends android.os.IInterface
   public void onUserLiked(java.lang.String user, java.lang.String profileUrl, int count) throws android.os.RemoteException;
   public void onUserFollowed(java.lang.String user, java.lang.String profileUrl) throws android.os.RemoteException;
   public void onUserShared(java.lang.String user, java.lang.String profileUrl) throws android.os.RemoteException;
+  // Custom Web Overlay
+  public void onCustomOverlaysChanged(java.lang.String overlaysJson) throws android.os.RemoteException;
 }

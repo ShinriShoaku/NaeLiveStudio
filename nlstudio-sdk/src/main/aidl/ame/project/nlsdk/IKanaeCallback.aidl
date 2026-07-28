@@ -16,4 +16,7 @@ interface IKanaeCallback {
     void onUserLiked(String user, String profileUrl, int count);
     void onUserFollowed(String user, String profileUrl);
     void onUserShared(String user, String profileUrl);
+
+    // Custom Web Overlay
+    void onCustomOverlaysChanged(String overlaysJson);
 }

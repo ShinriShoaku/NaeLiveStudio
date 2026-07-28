@@ -1,6 +1,6 @@
 /*
  * This file is auto-generated.  DO NOT MODIFY.
- * Using: /home/shinri/Android/Sdk/build-tools/36.0.0/aidl -p/home/shinri/Android/Sdk/platforms/android-36/framework.aidl -o/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/generated/aidl_source_output_dir/debug/out -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/debug/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/61969c6073364be09d3672c7433a7a2a/transformed/core-1.16.0/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/052b2f0d289805d19a451213a8be1c0d/transformed/versionedparcelable-1.1.1/aidl -d/tmp/aidl8173372485501360184.d /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl/ame/project/nlsdk/IKanaeService.aidl
+ * Using: /home/shinri/Android/Sdk/build-tools/36.0.0/aidl -p/home/shinri/Android/Sdk/platforms/android-36/framework.aidl -o/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/build/generated/aidl_source_output_dir/debug/out -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl -I/home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/debug/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/61969c6073364be09d3672c7433a7a2a/transformed/core-1.16.0/aidl -I/home/shinri/.gradle/caches/9.4.1/transforms/052b2f0d289805d19a451213a8be1c0d/transformed/versionedparcelable-1.1.1/aidl -d/tmp/aidl16299127516617980632.d /home/shinri/AndroidStudioProjects/NLStudio/nlstudio-sdk/src/main/aidl/ame/project/nlsdk/IKanaeService.aidl
  *
  * DO NOT CHECK THIS FILE INTO A CODE TREE (e.g. git, etc..).
  * ALWAYS GENERATE THIS FILE FROM UPDATED AIDL COMPILER
@@ -64,6 +64,14 @@ public interface IKanaeService extends android.os.IInterface
     @Override public boolean isPlaying() throws android.os.RemoteException
     {
       return false;
+    }
+    // Custom Web Overlay
+    @Override public java.lang.String getCustomOverlaysJson() throws android.os.RemoteException
+    {
+      return null;
+    }
+    @Override public void requestCustomOverlays() throws android.os.RemoteException
+    {
     }
     @Override
     public android.os.IBinder asBinder() {
@@ -213,6 +221,19 @@ public interface IKanaeService extends android.os.IInterface
           boolean _result = this.isPlaying();
           reply.writeNoException();
           reply.writeInt(((_result)?(1):(0)));
+          break;
+        }
+        case TRANSACTION_getCustomOverlaysJson:
+        {
+          java.lang.String _result = this.getCustomOverlaysJson();
+          reply.writeNoException();
+          reply.writeString(_result);
+          break;
+        }
+        case TRANSACTION_requestCustomOverlays:
+        {
+          this.requestCustomOverlays();
+          reply.writeNoException();
           break;
         }
         default:
@@ -470,6 +491,38 @@ public interface IKanaeService extends android.os.IInterface
         }
         return _result;
       }
+      // Custom Web Overlay
+      @Override public java.lang.String getCustomOverlaysJson() throws android.os.RemoteException
+      {
+        android.os.Parcel _data = android.os.Parcel.obtain();
+        android.os.Parcel _reply = android.os.Parcel.obtain();
+        java.lang.String _result;
+        try {
+          _data.writeInterfaceToken(DESCRIPTOR);
+          boolean _status = mRemote.transact(Stub.TRANSACTION_getCustomOverlaysJson, _data, _reply, 0);
+          _reply.readException();
+          _result = _reply.readString();
+        }
+        finally {
+          _reply.recycle();
+          _data.recycle();
+        }
+        return _result;
+      }
+      @Override public void requestCustomOverlays() throws android.os.RemoteException
+      {
+        android.os.Parcel _data = android.os.Parcel.obtain();
+        android.os.Parcel _reply = android.os.Parcel.obtain();
+        try {
+          _data.writeInterfaceToken(DESCRIPTOR);
+          boolean _status = mRemote.transact(Stub.TRANSACTION_requestCustomOverlays, _data, _reply, 0);
+          _reply.readException();
+        }
+        finally {
+          _reply.recycle();
+          _data.recycle();
+        }
+      }
     }
     static final int TRANSACTION_registerCallback = (android.os.IBinder.FIRST_CALL_TRANSACTION + 0);
     static final int TRANSACTION_unregisterCallback = (android.os.IBinder.FIRST_CALL_TRANSACTION + 1);
@@ -486,6 +539,8 @@ public interface IKanaeService extends android.os.IInterface
     static final int TRANSACTION_getQueueJson = (android.os.IBinder.FIRST_CALL_TRANSACTION + 12);
     static final int TRANSACTION_requestQueue = (android.os.IBinder.FIRST_CALL_TRANSACTION + 13);
     static final int TRANSACTION_isPlaying = (android.os.IBinder.FIRST_CALL_TRANSACTION + 14);
+    static final int TRANSACTION_getCustomOverlaysJson = (android.os.IBinder.FIRST_CALL_TRANSACTION + 15);
+    static final int TRANSACTION_requestCustomOverlays = (android.os.IBinder.FIRST_CALL_TRANSACTION + 16);
   }
   /** @hide */
   public static final java.lang.String DESCRIPTOR = "ame.project.nlsdk.IKanaeService";
@@ -507,4 +562,7 @@ public interface IKanaeService extends android.os.IInterface
   public java.lang.String getQueueJson() throws android.os.RemoteException;
   public void requestQueue() throws android.os.RemoteException;
   public boolean isPlaying() throws android.os.RemoteException;
+  // Custom Web Overlay
+  public java.lang.String getCustomOverlaysJson() throws android.os.RemoteException;
+  public void requestCustomOverlays() throws android.os.RemoteException;
 }

@@ -471,6 +471,7 @@ class SceneCanvasView @JvmOverloads constructor(
             LayerType.TIKTOK_JOIN -> android.R.drawable.ic_menu_add
             LayerType.EFFECT -> android.R.drawable.btn_star_big_on
             LayerType.MUSIC -> android.R.drawable.ic_media_play
+            LayerType.KANAE_WEB -> android.R.drawable.ic_menu_view
             else -> null
         }
         if (badgeIcon != null) {

@@ -87,6 +87,10 @@ class EditorLayerAdapter(
                     ivTypeBadge.setImageResource(android.R.drawable.ic_menu_sort_by_size)
                     ivTypeBadge.visibility = View.VISIBLE
                 }
+                LayerType.KANAE_WEB -> {
+                    ivTypeBadge.setImageResource(android.R.drawable.ic_menu_view)
+                    ivTypeBadge.visibility = View.VISIBLE
+                }
                 else -> ivTypeBadge.visibility = View.GONE
             }
 

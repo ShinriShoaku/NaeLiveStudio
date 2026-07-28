@@ -361,6 +361,11 @@ public class StreamService extends Service implements ConnectChecker {
         public void onUserShared(String user, String profileUrl) {
             TikTokChatBus.getInstance().onUserShared(user, profileUrl);
         }
+
+        @Override
+        public void onCustomOverlaysChanged(String overlaysJson) {
+            Log.d(TAG, "Custom overlays updated from Kanae");
+        }
     };
 
     private void bindKanaeService() {
@@ -644,8 +649,10 @@ public class StreamService extends Service implements ConnectChecker {
                     + savedWidth + "x" + savedHeight + " (orientation="
                     + (savedWidth > savedHeight ? "LANDSCAPE" : "PORTRAIT") + ")");
 
-            // REMOVED prewarmAllVideoBackgroundCaches() to reduce UI lag during stream start.
-            // Precaching is now explicitly handled in MainActivity with a progress dialog.
+            // Optimasi: Pre-warm Web Overlays dari initial scene
+            if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
+                prewarmWebOverlays(initialSceneJson);
+            }
 
             if (ACTION_START.equals(action)) {
                 String rtmpUrl = intent.getStringExtra(EXTRA_RTMP_URL);
@@ -998,7 +1005,8 @@ public class StreamService extends Service implements ConnectChecker {
                         && !"TIKTOK_CHAT".equals(layerType) && !"TIKTOK_GIFT".equals(layerType)
                         && !"TIKTOK_JOIN".equals(layerType)
                         && !"MUSIC_CURRENT".equals(layerType) && !"MUSIC_QUEUE".equals(layerType)
-                        && !"MUSIC".equals(layerType) && !"EFFECT".equals(layerType)) continue;
+                        && !"MUSIC".equals(layerType) && !"EFFECT".equals(layerType)
+                        && !"KANAE_WEB".equals(layerType)) continue;
 
                 Log.d(TAG, "Adding composite layer: " + layerType + " uri=" + lo.optString("uri", ""));
                 CompositeSceneVideoSource.Layer layer = new CompositeSceneVideoSource.Layer(
@@ -1360,6 +1368,41 @@ public class StreamService extends Service implements ConnectChecker {
         sendBroadcast(intent);
     }
 
+    private void prewarmWebOverlays(String sceneJson) {
+        try {
+            JSONObject o = new JSONObject(sceneJson);
+            JSONArray layerArr = o.optJSONArray("layers");
+            if (layerArr != null) {
+                for (int i = 0; i < layerArr.length(); i++) {
+                    JSONObject lo = layerArr.getJSONObject(i);
+                    if ("KANAE_WEB".equals(lo.optString("type"))) {
+                        String uri = lo.getString("uri");
+                        String id = uri.startsWith("kanae:web:") ? uri.substring("kanae:web:".length()) : uri;
+                        
+                        // Cari URL overlay
+                        String url = null;
+                        List<ame.project.nlsdk.KanaeWebOverlay> overlays = ame.project.nlsdk.KanaeOverlayBridge.INSTANCE.getOverlays();
+                        for (ame.project.nlsdk.KanaeWebOverlay overlay : overlays) {
+                            if (overlay.getId().equals(id)) {
+                                url = overlay.getUrl();
+                                break;
+                            }
+                        }
+                        
+                        if (url != null) {
+                            int lw = Math.max(1, (int)(lo.getDouble("w") * savedWidth));
+                            int lh = Math.max(1, (int)(lo.getDouble("h") * savedHeight));
+                            Log.d(TAG, "Pre-warming web overlay: " + id + " (" + lw + "x" + lh + ")");
+                            KanaeWebOverlayBus.getInstance().prewarm(this, id, url, lw, lh);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Gagal pre-warm web overlays", e);
+        }
+    }
+
     private void stopEverything() {
         stopEverything(null);
     }
@@ -1447,6 +1490,7 @@ public class StreamService extends Service implements ConnectChecker {
     @Override
     public void onDestroy() {
         stopEverything();
+        KanaeWebOverlayBus.getInstance().releaseAll();
         isServiceRunning = false;
         instance = null;
         sceneSwitchExecutor.shutdownNow();

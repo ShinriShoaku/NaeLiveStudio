@@ -41,6 +41,7 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.CheckBox
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -152,6 +153,7 @@ class MainActivity : AppCompatActivity() {
     private var tabEditorTools: com.google.android.material.tabs.TabLayout? = null
     private var layoutToolsGeneral: View? = null
     private var layoutToolsTikTok: View? = null
+    private var layoutToolsKanae: android.widget.LinearLayout? = null
 
     // Layer strip (klik utk pilih layer, X utk hapus - lihat EditorLayerAdapter)
     private var rvLayerStrip: RecyclerView? = null
@@ -391,6 +393,14 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // FIX: Pastikan semua suara yang diputar aplikasi ini (termasuk WebView) 
+        // diperbolehkan untuk ditangkap oleh system audio capture.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+            audioManager.allowedCapturePolicy = android.media.AudioAttributes.ALLOW_CAPTURE_BY_ALL
+        }
+
         setContentView(R.layout.activity_main)
 
         // Obtain the FirebaseAnalytics instance.
@@ -520,11 +530,25 @@ class MainActivity : AppCompatActivity() {
             filter,
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+
+        // Custom Web Overlay dari Kanae Player: bind ke service Kanae dan render ulang
+        // tombol overlay di tab KANAE tiap kali datanya berubah.
+        ame.project.nlsdk.KanaeOverlayBridge.onOverlaysUpdated = { list ->
+            runOnUiThread { renderKanaeOverlayButtons(list) }
+        }
+        ame.project.nlsdk.KanaeOverlayBridge.onConnectionStateChanged = {
+            runOnUiThread { renderKanaeOverlayButtons(ame.project.nlsdk.KanaeOverlayBridge.overlays) }
+        }
+        ame.project.nlsdk.KanaeOverlayBridge.bind(this)
+        // Render langsung pakai data yang sudah ada (kalau sebelumnya sempat konek),
+        // supaya tab KANAE tidak kosong menunggu callback pertama.
+        renderKanaeOverlayButtons(ame.project.nlsdk.KanaeOverlayBridge.overlays)
     }
 
     override fun onStop() {
         super.onStop()
         unregisterReceiver(statusReceiver)
+        ame.project.nlsdk.KanaeOverlayBridge.unbind(this)
     }
 
     override fun onDestroy() {
@@ -687,6 +711,7 @@ class MainActivity : AppCompatActivity() {
         tabEditorTools = root.findViewById(R.id.tabEditorTools)
         layoutToolsGeneral = root.findViewById(R.id.layoutToolsGeneral)
         layoutToolsTikTok = root.findViewById(R.id.layoutToolsTikTok)
+        layoutToolsKanae = root.findViewById(R.id.layoutToolsKanae)
 
         rvLayerStrip = root.findViewById(R.id.rvLayerStrip)
         tvLayerCount = root.findViewById(R.id.tvLayerCount)
@@ -926,11 +951,80 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "Music Queue ditambahkan", Toast.LENGTH_SHORT).show()
     }
 
+    /** Tambah satu layer baru dari salah satu Custom Web Overlay milik Kanae Player. */
+    private fun addKanaeWebLayer(overlay: ame.project.nlsdk.KanaeWebOverlay) {
+        addLayer(LayerType.KANAE_WEB, "kanae:web:${overlay.id}", 0.8f, 0.3f, 0.1f, 0.3f)
+        Toast.makeText(this, "${overlay.name} ditambahkan", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Render ulang daftar tombol overlay di tab KANAE, dipanggil setiap kali
+     * KanaeOverlayBridge.onOverlaysUpdated fire (mis. Kanae baru connect, atau
+     * user menambah/menghapus/ubah nama custom overlay di Kanae Player).
+     */
+    private fun renderKanaeOverlayButtons(list: List<ame.project.nlsdk.KanaeWebOverlay>) {
+        val container = layoutToolsKanae ?: return
+        container.removeAllViews()
+
+        if (list.isEmpty()) {
+            val message = if (ame.project.nlsdk.KanaeOverlayBridge.isConnected)
+                "Belum ada Custom Web Overlay di Kanae Player"
+            else
+                "Kanae Player belum terhubung. Buka Kanae Player lalu coba lagi."
+            val tv = TextView(this).apply {
+                text = message
+                setTextColor(android.graphics.Color.parseColor("#888888"))
+                textSize = 11f
+                setPadding(8, 8, 8, 8)
+            }
+            container.addView(tv)
+            return
+        }
+
+        list.forEach { overlay ->
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setPadding(8, 8, 8, 8)
+                isClickable = true
+                isFocusable = true
+                val ripple = android.util.TypedValue()
+                theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true)
+                setBackgroundResource(ripple.resourceId)
+                setOnClickListener { addKanaeWebLayer(overlay) }
+            }
+            val icon = android.widget.ImageButton(this).apply {
+                layoutParams = LinearLayout.LayoutParams(dpToPxKanaeTab(44), dpToPxKanaeTab(44))
+                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                setImageResource(R.drawable.layered)
+                setPadding(dpToPxKanaeTab(8), dpToPxKanaeTab(8), dpToPxKanaeTab(8), dpToPxKanaeTab(8))
+                imageTintList = android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#7FD8A6"))
+                contentDescription = "Tambah ${overlay.name}"
+                isClickable = false
+            }
+            val label = TextView(this).apply {
+                text = overlay.name.ifBlank { "Overlay" }
+                setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
+                textSize = 9f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            item.addView(icon)
+            item.addView(label)
+            container.addView(item)
+        }
+    }
+
+    private fun dpToPxKanaeTab(dp: Int): Int =
+        (dp * resources.displayMetrics.density).toInt()
+
     private fun setupEditorTabs() {
         tabEditorTools?.apply {
             removeAllTabs()
             addTab(newTab().setText("UMUM"))
             addTab(newTab().setText("TIKTOK"))
+            addTab(newTab().setText("KANAE"))
 
             addOnTabSelectedListener(object : com.google.android.material.tabs.TabLayout.OnTabSelectedListener {
                 override fun onTabSelected(tab: com.google.android.material.tabs.TabLayout.Tab?) {
@@ -938,10 +1032,20 @@ class MainActivity : AppCompatActivity() {
                         0 -> {
                             layoutToolsGeneral?.visibility = View.VISIBLE
                             layoutToolsTikTok?.visibility = View.GONE
+                            layoutToolsKanae?.visibility = View.GONE
                         }
                         1 -> {
                             layoutToolsGeneral?.visibility = View.GONE
                             layoutToolsTikTok?.visibility = View.VISIBLE
+                            layoutToolsKanae?.visibility = View.GONE
+                        }
+                        2 -> {
+                            layoutToolsGeneral?.visibility = View.GONE
+                            layoutToolsTikTok?.visibility = View.GONE
+                            layoutToolsKanae?.visibility = View.VISIBLE
+                            // Minta data terbaru tiap kali tab Kanae dibuka, jaga-jaga kalau
+                            // user baru saja menambah/menghapus custom overlay di app Kanae.
+                            ame.project.nlsdk.KanaeOverlayBridge.refresh()
                         }
                     }
                 }
@@ -1612,6 +1716,13 @@ class MainActivity : AppCompatActivity() {
         return url.replace(key, "$visible****")
     }
 
+    private val overlayPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            // Setelah balik dari settings, cek lagi. Kalau user kasih izin, lanjut.
+            // Kalau tidak, ya sudah (web overlay akan blank/tidak muncul).
+            checkPermissionsThenStart()
+        }
+
     private fun checkPermissionsThenStart() {
         val needed = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -1624,6 +1735,12 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
         if (missing.isEmpty()) {
+            // Cek izin "Display over other apps" khusus untuk WebView (Kanae Web Overlay)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+                showOverlayPermissionDialog()
+                return
+            }
+
             checkAndOptimizeAllVideos {
                 startPreCachingAllNecessary {
                     requestScreenCapture()
@@ -1638,6 +1755,27 @@ class MainActivity : AppCompatActivity() {
      * Mengecek semua scene dan melakukan re-scale video background jika resolusi target berubah.
      * Ini dipanggil sesaat sebelum Live/Record dimulai untuk memastikan efisiensi decoding.
      */
+    private fun showOverlayPermissionDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Izin Overlay Diperlukan")
+            .setMessage("Untuk menampilkan Web Overlay (Chat/Donasi) dengan lancar, NL Studio membutuhkan izin 'Tampilkan di atas aplikasi lain'.")
+            .setPositiveButton("Buka Pengaturan") { _, _ ->
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                overlayPermissionLauncher.launch(intent)
+            }
+            .setNegativeButton("Lewati (Mungkin Blank)") { _, _ ->
+                checkAndOptimizeAllVideos {
+                    startPreCachingAllNecessary {
+                        requestScreenCapture()
+                    }
+                }
+            }
+            .show()
+    }
+
     private fun checkAndOptimizeAllVideos(onComplete: () -> Unit) {
         val (targetW, targetH) = getTargetResolution()
         val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)

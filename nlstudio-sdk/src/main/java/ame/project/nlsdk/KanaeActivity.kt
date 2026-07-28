@@ -113,6 +113,10 @@ class KanaeActivity : AppCompatActivity() {
         override fun onUserShared(user: String?, profileUrl: String?) {
             addLog("[SHARE] $user membagikan")
         }
+
+        override fun onCustomOverlaysChanged(overlaysJson: String?) {
+            Log.d(TAG, "Custom overlays updated")
+        }
     }
 
     private fun addLog(message: String) {

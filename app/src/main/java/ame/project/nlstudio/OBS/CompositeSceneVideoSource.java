@@ -69,6 +69,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             this.w = w;
             this.h = h;
             this.zIndex = zIndex;
+            Log.d(TAG, "New Layer created: type=" + type + ", uri=" + uri + ", size=" + w + "x" + h);
         }
     }
 
@@ -108,12 +109,12 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
     private int oesProgram, rgbaProgram;
     private int overlayTextureId = 0;
-    // FIX PERFORMA BESAR: background BackgroundType.SCREEN (rekam layar) dulu digambar lewat
-    // Canvas 2D (software, CPU) - lihat catatan panjang di computeRequiresDynamicOverlayRedraw()
-    // dan drawAllLayers(). Sekarang screen capture punya texture GL sendiri, di-upload &
-    // digambar langsung di GPU (persis seperti video background), BUKAN lewat overlayBuffer lagi.
     private int screenTextureId = 0;
     private final java.util.Map<VideoTextureDecoder, Integer> decoderTextures = new java.util.HashMap<>();
+    
+    // Map untuk menyimpan Texture ID khusus Web Overlay (OES)
+    private final java.util.Map<String, Integer> webOverlayTextures = new java.util.concurrent.ConcurrentHashMap<>();
+    
     private Bitmap overlayBuffer;
     private Canvas overlayCanvas;
     private final Object overlayLock = new Object();
@@ -158,6 +159,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                 case MUSIC_QUEUE:
                 case SCREEN:        // layer screen-share sbg elemen overlay (mis. PiP kecil), beda dari BackgroundType.SCREEN di atas - ini masih lewat Canvas jadi tetap dianggap dinamis
                 case VOICE_ANIM:    // bereaksi ke level mic yang berubah tiap saat
+                case KANAE_WEB:     // overlay web selalu dianggap dinamis (animasi/JS)
                     return true;
                 default:
                     break;
@@ -182,15 +184,17 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
     private FloatBuffer vertexBuffer, texCoordBuffer;
     private FloatBuffer screenVertexBuffer; // Buffer khusus untuk Fit-Center screen
+    private FloatBuffer layerBuffer; // Buffer reusable untuk layer dinamis/web
     private final float[] identityMatrix = new float[16];
     private final float[] flipMatrix = new float[16];
     {
         android.opengl.Matrix.setIdentityM(identityMatrix, 0);
         android.opengl.Matrix.setIdentityM(flipMatrix, 0);
-        // FIX: Y-axis flip untuk output Canvas. Android Bitmap/Canvas (0,0) di top-left,
-        // sedangkan OpenGL (0,0) di bottom-left. Tanpa flip, hasil render Canvas ke GL
-        // akan terbalik vertikal (atas-bawah ketukar).
+        // FIX: Matrix for flipping Y texture coordinates (y = 1.0 - y)
+        // Correct order: Translate by -1 in Y, then Scale by -1 in Y.
+        // In OpenGL matrix multiplication order (Last-In-First-Applied):
         android.opengl.Matrix.scaleM(flipMatrix, 0, 1f, -1f, 1f);
+        android.opengl.Matrix.translateM(flipMatrix, 0, 0f, -1f, 0f);
     }
 
     public CompositeSceneVideoSource(Context context, BackgroundType backgroundType,
@@ -311,13 +315,13 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         initGl();
 
         long frameIntervalNs = 1_000_000_000L / targetFps;
-        long nextFrameTimeNs = System.nanoTime();
+        long currentNextFrameTimeNs = System.nanoTime();
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
         while (running) {
             long now = System.nanoTime();
-            if (now < nextFrameTimeNs) {
-                try { Thread.sleep((nextFrameTimeNs - now) / 1_000_000L); } catch (InterruptedException e) { break; }
+            if (now < currentNextFrameTimeNs) {
+                try { Thread.sleep((currentNextFrameTimeNs - now) / 1_000_000L); } catch (InterruptedException e) { break; }
             }
 
             GLES20.glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
@@ -376,8 +380,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
             EGL14.eglSwapBuffers(eglDisplay, eglSurface);
 
-            nextFrameTimeNs += frameIntervalNs;
-            if (System.nanoTime() - nextFrameTimeNs > frameIntervalNs) nextFrameTimeNs = System.nanoTime();
+            currentNextFrameTimeNs += frameIntervalNs;
+            if (System.nanoTime() - currentNextFrameTimeNs > frameIntervalNs) currentNextFrameTimeNs = System.nanoTime();
         }
         releaseGl();
     }
@@ -413,25 +417,33 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                 overlayCanvas = new Canvas(overlayBuffer);
             }
             overlayBuffer.eraseColor(Color.TRANSPARENT);
-            boolean hasPendingOverlays = false;
+            boolean hasPendingCanvasContent = false;
 
-            // Draw Background Image if active (Z-index effectively -1). Background SCREEN sudah
-            // digambar terpisah langsung di GPU (lihat runDrawLoop()), jadi tidak lagi lewat sini.
+            // 1. Draw Background Image if active (effectively Z-index -1)
             if (backgroundType == BackgroundType.IMAGE && backgroundImage != null) {
-                // FIX: dulu src=null (seluruh bitmap dipaksa masuk dst) -> stretch/gepeng kalau
-                // aspect ratio beda. Sekarang pakai backgroundImageCropRect (center-crop).
-                overlayCanvas.drawBitmap(backgroundImage, backgroundImageCropRect, new Rect(0,0, designWidth, designHeight), paint);
-                hasPendingOverlays = true;
+                overlayCanvas.drawBitmap(backgroundImage, backgroundImageCropRect, new Rect(0, 0, designWidth, designHeight), paint);
+                hasPendingCanvasContent = true;
             }
 
+            // 2. Draw Layers in Z-order, interleaving Canvas and direct GL drawing
             for (Layer layer : layers) {
-                // Non-video layer: batch onto Canvas
-                drawSingleLayer(overlayCanvas, layer, paint);
-                hasPendingOverlays = true;
+                if (layer.type == LayerType.KANAE_WEB) {
+                    // GL Layer: Flush current canvas content first to maintain Z-order
+                    if (hasPendingCanvasContent) {
+                        flushOverlayCanvas();
+                        hasPendingCanvasContent = false;
+                    }
+                    // Draw GL layer directly to screen
+                    drawSingleLayer(overlayCanvas, layer, paint);
+                } else {
+                    // Canvas Layer: Draw onto buffer
+                    drawSingleLayer(overlayCanvas, layer, paint);
+                    hasPendingCanvasContent = true;
+                }
             }
 
-            // Final flush for overlays on top
-            if (hasPendingOverlays) {
+            // 3. Final flush for any remaining canvas layers
+            if (hasPendingCanvasContent) {
                 flushOverlayCanvas();
             }
         }
@@ -447,6 +459,8 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     }
 
     private void flushOverlayCanvas() {
+        if (overlayBuffer == null) return;
+        
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTextureId);
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, overlayBuffer, 0);
 
@@ -455,8 +469,49 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
         drawTexture(rgbaProgram, overlayTextureId, flipMatrix, false);
         GLES20.glDisable(GLES20.GL_BLEND);
 
-        // Reset canvas for next batch if needed (though we currently erase at start of drawAllLayers)
+        // Clear buffer for next batch of layers
         overlayBuffer.eraseColor(Color.TRANSPARENT);
+    }
+
+    private int getWebOverlayTexture(String id) {
+        Integer texId = webOverlayTextures.get(id);
+        if (texId == null) {
+            int[] tex = new int[1];
+            GLES20.glGenTextures(1, tex, 0);
+            texId = tex[0];
+            GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, texId);
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+            webOverlayTextures.put(id, texId);
+        }
+        return texId;
+    }
+
+    private void drawTextureAt(int program, int texId, float[] matrix, boolean isOes, RectF dst) {
+        // Konversi koordinat Pixel (0..design) ke OpenGL Normalized Device Coordinates (-1..1)
+        // OpenGL Y-axis starts from bottom (-1) to top (1)
+        float x1 = (dst.left / designWidth) * 2f - 1f;
+        float x2 = (dst.right / designWidth) * 2f - 1f;
+        float y1 = 1f - (dst.bottom / designHeight) * 2f;
+        float y2 = 1f - (dst.top / designHeight) * 2f;
+
+        float[] vdata = {
+                x1, y1,
+                x2, y1,
+                x1, y2,
+                x2, y2
+        };
+        
+        if (layerBuffer == null) {
+            layerBuffer = ByteBuffer.allocateDirect(vdata.length * 4)
+                    .order(ByteOrder.nativeOrder()).asFloatBuffer();
+        }
+        layerBuffer.clear();
+        layerBuffer.put(vdata).position(0);
+        
+        drawTextureWithBuffer(program, texId, matrix, isOes, layerBuffer);
     }
 
     private int getDecoderTexture(VideoTextureDecoder decoder) {
@@ -509,6 +564,44 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             else if (layer.type == LayerType.MUSIC_QUEUE) bmp = MusicBus.getInstance().renderQueue(context, lw, lh);
 
             if (bmp != null && !bmp.isRecycled()) canvas.drawBitmap(bmp, null, dst, paint);
+            return;
+        }
+
+        // Custom Web Overlay dari Kanae Player (TEKNIK OES TEXTURE - ZERO COPY).
+        if (layer.type == LayerType.KANAE_WEB) {
+            int lw = Math.max(1, Math.round(dst.width()));
+            int lh = Math.max(1, Math.round(dst.height()));
+            String id = (layer.uri != null && layer.uri.startsWith("kanae:web:")) ? layer.uri.substring("kanae:web:".length()) : layer.uri;
+
+            if (id == null) return;
+
+            String url = null;
+            List<ame.project.nlsdk.KanaeWebOverlay> overlays = ame.project.nlsdk.KanaeOverlayBridge.INSTANCE.getOverlays();
+            for (ame.project.nlsdk.KanaeWebOverlay overlay : overlays) {
+                if (overlay.getId().equals(id)) {
+                    url = overlay.getUrl();
+                    break;
+                }
+            }
+
+            if (url != null) {
+                // 1. Dapatkan atau buat Texture ID OES untuk overlay ini
+                int texId = getWebOverlayTexture(id);
+                
+                // 2. Dapatkan entry dari Bus dengan Hardware Acceleration (VirtualDisplay)
+                KanaeWebOverlayBus.Entry entry = KanaeWebOverlayBus.getInstance().getOrLoadEntry(context, id, url, lw, lh);
+                
+                if (entry != null && entry.isReady) {
+                    // 3. Update frame ke texture ID kita (Real-time OES dari GPU ke GPU)
+                    entry.updateTexture(texId);
+                    
+                    // 4. Gambar langsung pakai Shader OES (Smooth 60fps) dengan Blending
+                    GLES20.glEnable(GLES20.GL_BLEND);
+                    GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
+                    drawTextureAt(oesProgram, texId, entry.texMatrix, true, dst);
+                    GLES20.glDisable(GLES20.GL_BLEND);
+                }
+            }
             return;
         }
 
@@ -601,21 +694,29 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     }
 
     private void drawTextureWithBuffer(int program, int texId, float[] matrix, boolean isOes, FloatBuffer vBuffer) {
-        if (vBuffer == null) vBuffer = vertexBuffer;
+        FloatBuffer actualVBuffer = (vBuffer == null) ? vertexBuffer : vBuffer;
         GLES20.glUseProgram(program);
         int posLoc = GLES20.glGetAttribLocation(program, "aPosition");
         int texLoc = GLES20.glGetAttribLocation(program, "aTexCoord");
         int mtxLoc = GLES20.glGetUniformLocation(program, "uMatrix");
+        int samplerLoc = GLES20.glGetUniformLocation(program, "sTexture");
 
         GLES20.glEnableVertexAttribArray(posLoc);
-        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, vBuffer);
+        GLES20.glVertexAttribPointer(posLoc, 2, GLES20.GL_FLOAT, false, 0, actualVBuffer);
         GLES20.glEnableVertexAttribArray(texLoc);
         GLES20.glVertexAttribPointer(texLoc, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer);
         GLES20.glUniformMatrix4fv(mtxLoc, 1, false, matrix, 0);
 
+        if (samplerLoc >= 0) {
+            GLES20.glUniform1i(samplerLoc, 0); // Bind to GL_TEXTURE0
+        }
+
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
         GLES20.glBindTexture(isOes ? GLES11Ext.GL_TEXTURE_EXTERNAL_OES : GLES20.GL_TEXTURE_2D, texId);
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+
+        GLES20.glDisableVertexAttribArray(posLoc);
+        GLES20.glDisableVertexAttribArray(texLoc);
     }
 
     private int lastSrcW = -1, lastSrcH = -1;
@@ -703,6 +804,15 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             GLES20.glDeleteTextures(1, new int[]{entry.getValue()}, 0);
         }
         decoderTextures.clear();
+        
+        // JANGAN release WebOverlay di sini.
+        // Biarkan StreamService yang memanggil releaseAll() saat stream benar-benar mati,
+        // supaya transisi antar scene mulus dan video tidak terhenti/race condition.
+        
+        for (int texId : webOverlayTextures.values()) {
+            GLES20.glDeleteTextures(1, new int[]{texId}, 0);
+        }
+        webOverlayTextures.clear();
 
         if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);

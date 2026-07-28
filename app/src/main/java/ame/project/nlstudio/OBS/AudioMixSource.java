@@ -179,6 +179,14 @@ public class AudioMixSource extends AudioSource {
     @SuppressLint("MissingPermission")
     @RequiresApi(api = Build.VERSION_CODES.Q)
     private void setupRecords() {
+        // Ensure any existing records are released before re-initializing
+        releaseRecord(micRecord);
+        releaseRecord(internalRecord);
+        releaseRecord(musicRecord);
+        micRecord = null;
+        internalRecord = null;
+        musicRecord = null;
+
         // Use a buffer size that is a multiple of our frame size
         int minBuffer = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, ENCODING);
         bufferSizeBytes = Math.max(minBuffer, SAMPLES_PER_FRAME * 2) * 2;

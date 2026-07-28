@@ -24,4 +24,8 @@ interface IKanaeService {
     String getQueueJson();
     void requestQueue();
     boolean isPlaying();
+
+    // Custom Web Overlay
+    String getCustomOverlaysJson();
+    void requestCustomOverlays();
 }

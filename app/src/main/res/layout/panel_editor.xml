@@ -349,6 +349,19 @@
 
         </LinearLayout>
 
+        <!-- ===================== TOOLS: KANAE (Custom Web Overlay) ===================== -->
+        <!-- Diisi dinamis lewat kode (renderKanaeOverlayButtons di MainActivity), karena
+             jumlah & nama overlay tergantung apa yang sedang dikonfigurasi di Kanae Player. -->
+        <LinearLayout
+            android:id="@+id/layoutToolsKanae"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:background="@drawable/bg_scene_card"
+            android:padding="8dp"
+            android:layout_marginTop="4dp"
+            android:visibility="gone" />
+
         <!-- ===================== LAYER STRIP: klik utk pilih, X utk hapus ===================== -->
         <LinearLayout
             android:layout_width="match_parent"

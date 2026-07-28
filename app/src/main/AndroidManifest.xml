@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <queries>
@@ -40,6 +41,11 @@
             </intent-filter>
         </activity>
         <activity android:name=".VoiceAnimSettingsActivity" />
+        <activity
+            android:name=".OBS.OverlayHostActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance" />
         <activity android:name="ame.project.nlsdk.KanaeActivity" />
         <service
             android:name=".OBS.StreamService"
