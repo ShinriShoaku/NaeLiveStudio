@@ -1007,6 +1007,7 @@ class MainActivity : AppCompatActivity() {
                 text = overlay.name.ifBlank { "Overlay" }
                 setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
                 textSize = 9f
+                gravity = android.view.Gravity.CENTER
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }
