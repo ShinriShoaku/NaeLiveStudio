@@ -58,6 +58,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.firebase.analytics.FirebaseAnalytics
 import java.util.UUID
 
+
 /**
  * === LOGGING TAGS UNTUK DEBUG RESOLUSI ===
  * [RES-MAIN] = Resolusi di MainActivity
@@ -97,6 +98,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var etStreamKey: EditText
     private lateinit var tvFullUrlPreview: TextView
     private lateinit var spinnerResolution: Spinner
+    private lateinit var llCustomResolution: LinearLayout
+    private lateinit var etCustomResWidth: EditText
+    private lateinit var etCustomResHeight: EditText
     private lateinit var spinnerFps: Spinner
     private lateinit var spinnerEncoderType: Spinner
     private lateinit var etVideoBitrate: EditText
@@ -179,6 +183,8 @@ class MainActivity : AppCompatActivity() {
     private var editingInternalAudioEnabled: Boolean = true
     private var editingLayers: MutableList<SceneLayer> = mutableListOf()
     private var selectedLayerId: String? = null
+
+
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -435,6 +441,16 @@ class MainActivity : AppCompatActivity() {
         etStreamKey = dialogSettingsView.findViewById(R.id.etStreamKey)
         tvFullUrlPreview = dialogSettingsView.findViewById(R.id.tvFullUrlPreview)
         spinnerResolution = dialogSettingsView.findViewById(R.id.spinnerResolution)
+        llCustomResolution = dialogSettingsView.findViewById(R.id.llCustomResolution)
+        etCustomResWidth = dialogSettingsView.findViewById(R.id.etCustomResWidth)
+        etCustomResHeight = dialogSettingsView.findViewById(R.id.etCustomResHeight)
+        spinnerResolution.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                val isCustom = spinnerResolution.selectedItem?.toString() == "Custom"
+                llCustomResolution.visibility = if (isCustom) View.VISIBLE else View.GONE
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
         spinnerFps = dialogSettingsView.findViewById(R.id.spinnerFps)
         spinnerEncoderType = dialogSettingsView.findViewById(R.id.spinnerEncoderType)
         etVideoBitrate = dialogSettingsView.findViewById(R.id.etVideoBitrate)
@@ -567,6 +583,10 @@ class MainActivity : AppCompatActivity() {
 
         // Quality Settings
         setSpinnerValue(spinnerResolution, prefs.getString("resolution", "720p") ?: "720p")
+        etCustomResWidth.setText(prefs.getInt("custom_res_width", 1080).toString())
+        etCustomResHeight.setText(prefs.getInt("custom_res_height", 1920).toString())
+        llCustomResolution.visibility =
+            if (spinnerResolution.selectedItem?.toString() == "Custom") View.VISIBLE else View.GONE
         setSpinnerValue(spinnerFps, prefs.getString("fps", "30") ?: "30")
         setSpinnerValue(spinnerEncoderType, prefs.getString("encoder_type", "H264") ?: "H264")
         setSpinnerValue(spinnerVideoBgScale, prefs.getString("video_bg_scale", "Default (Optimize Auto)") ?: "Default (Optimize Auto)")
@@ -596,6 +616,8 @@ class MainActivity : AppCompatActivity() {
             putString("server_url", etServerUrl.text.toString())
             putString("stream_key", etStreamKey.text.toString())
             putString("resolution", spinnerResolution.selectedItem?.toString())
+            putInt("custom_res_width", etCustomResWidth.text.toString().toIntOrNull() ?: 1080)
+            putInt("custom_res_height", etCustomResHeight.text.toString().toIntOrNull() ?: 1920)
             putString("fps", spinnerFps.selectedItem?.toString())
             putString("encoder_type", spinnerEncoderType.selectedItem?.toString())
             putString("video_bitrate", etVideoBitrate.text.toString())
@@ -1111,10 +1133,14 @@ class MainActivity : AppCompatActivity() {
         val safeExistingId = if (editingSceneId == SceneRepository.ID_SCREEN) null else editingSceneId
 
         val metrics = resources.displayMetrics
-        // Resolusi root otomatis diambil dari Setting Quality, menyesuaikan orientasi scene yang sedang diedit
+        val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
         val (targetW, targetH) = getTargetResolution()
+        
         val forced = editingForcedRootResolution
-        val (rootW, rootH) = if (forced != null) {
+        val (rootW, rootH) = if (selectedRes == "Custom") {
+            // Untuk Custom, simpan persis sesuai target resolution tanpa paksaan orientasi scene sebelumnya
+            targetW to targetH
+        } else if (forced != null) {
             val forcedIsPortrait = forced.second > forced.first
             val targetIsPortrait = targetH > targetW
             if (forcedIsPortrait == targetIsPortrait) targetW to targetH else targetH to targetW
@@ -1360,15 +1386,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshCanvasAspectRatio() {
-        val (targetW, targetH) = getTargetResolution()
-        val forced = editingForcedRootResolution
-        val (rootW, rootH) = if (forced != null) {
-            val forcedIsPortrait = forced.second > forced.first
-            val targetIsPortrait = targetH > targetW
-            if (forcedIsPortrait == targetIsPortrait) targetW to targetH else targetH to targetW
-        } else {
+        val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
+        // UI Preview should ignore screen orientation for presets, and for Custom it will follow exact values
+        val (targetW, targetH) = getTargetResolution(ignoreScreenOrientation = true)
+        
+        val (rootW, rootH) = if (selectedRes == "Custom") {
+            // Untuk Custom, UI preview mengikuti angka persis (misal 1280x720 jadi Landscape)
             targetW to targetH
+        } else {
+            val forced = editingForcedRootResolution
+            if (forced != null) {
+                val forcedIsPortrait = forced.second > forced.first
+                val targetIsPortrait = targetH > targetW
+                if (forcedIsPortrait == targetIsPortrait) targetW to targetH else targetH to targetW
+            } else {
+                targetW to targetH
+            }
         }
+        
         val ratio = rootW.toFloat() / rootH
         Log.d(TAG, "refreshCanvasAspectRatio: root=${rootW}x${rootH} ratio=$ratio")
         sceneCanvasView.setTargetAspectRatio(ratio)
@@ -1426,6 +1461,21 @@ class MainActivity : AppCompatActivity() {
 
     /** Pindah ke scene ini sekarang: update judul di top bar, dan kirim ke StreamService kalau lagi live. */
     private fun switchToScene(scene: Scene, updateService: Boolean = true) {
+        // SAFETY CHECK: Saat sedang LIVE, jangan izinkan ganti ke scene dengan orientasi berbeda
+        // (misal dari Portrait ke Landscape) karena resolusi encoder sudah terlanjur dipacu di awal.
+        if (StreamService.isServiceRunning) {
+            val currentScene = scenes.find { it.id == activeSceneId }
+            if (currentScene != null) {
+                val currentIsPortrait = currentScene.rootHeight > currentScene.rootWidth
+                val newIsPortrait = scene.rootHeight > scene.rootWidth
+                if (currentIsPortrait != newIsPortrait) {
+                    Toast.makeText(this, "Tidak bisa ganti ke scene ${if (newIsPortrait) "Portrait" else "Landscape"} saat Live sedang berjalan", Toast.LENGTH_LONG).show()
+                    refreshSceneList() // Reset selection di UI list
+                    return
+                }
+            }
+        }
+
         Log.d(TAG, "=== switchToScene === updateService=$updateService")
         Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
 
@@ -1675,17 +1725,30 @@ class MainActivity : AppCompatActivity() {
         }
 
         // New Presets Click Listeners
+        val onPresetClick = { action: () -> Unit ->
+            val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
+            if (selectedRes == "Custom") {
+                AlertDialog.Builder(this)
+                    .setTitle("Preset Dinonaktifkan")
+                    .setMessage("Preset tidak dapat digunakan saat menggunakan Resolusi Custom. Silakan ganti ke resolusi standar (seperti 720p) untuk menggunakan preset.")
+                    .setPositiveButton("OK", null)
+                    .show()
+            } else {
+                action()
+            }
+        }
+
         dialogSceneManagerView.findViewById<View>(R.id.presetPortraitCenter)?.setOnClickListener {
-            applyPortraitPreset("center")
+            onPresetClick { applyPortraitPreset("center") }
         }
         dialogSceneManagerView.findViewById<View>(R.id.presetPortraitTop)?.setOnClickListener {
-            applyPortraitPreset("top")
+            onPresetClick { applyPortraitPreset("top") }
         }
         dialogSceneManagerView.findViewById<View>(R.id.presetPortraitBottom)?.setOnClickListener {
-            applyPortraitPreset("bottom")
+            onPresetClick { applyPortraitPreset("bottom") }
         }
         dialogSceneManagerView.findViewById<View>(R.id.presetLandscapeFull)?.setOnClickListener {
-            applyLandscapeFullPreset()
+            onPresetClick { applyLandscapeFullPreset() }
         }
 
         findViewById<View>(R.id.fabZoomIn)?.setOnClickListener { sceneCanvasView.zoomIn() }
@@ -2013,31 +2076,44 @@ class MainActivity : AppCompatActivity() {
         screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
     }
 
-    private fun getTargetResolution(): Pair<Int, Int> {
+    private fun getTargetResolution(ignoreScreenOrientation: Boolean = false): Pair<Int, Int> {
         val metrics = resources.displayMetrics
         val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
 
         if (selectedRes.contains("Native")) {
             return metrics.widthPixels to metrics.heightPixels
-        } else {
+        } else if (selectedRes == "Custom") {
+            // Batas aman: minimal 16px, maksimal 4096px (batas umum hw encoder)
+            val rawW = if (::etCustomResWidth.isInitialized) etCustomResWidth.text.toString().toIntOrNull() else null
+            val rawH = if (::etCustomResHeight.isInitialized) etCustomResHeight.text.toString().toIntOrNull() else null
+            val w = (rawW ?: 1080).coerceIn(16, 4096)
+            val h = (rawH ?: 1920).coerceIn(16, 4096)
+
+            // Untuk Custom, JANGAN menukar orientasi berdasarkan sensor HP.
+            // Biarkan user menentukan sendiri Landscape/Portrait via angka Width/Height.
+            return w to h
+        }else{
             val resString = selectedRes.split(" ")[0]
             val parts = resString.split("x")
             var w = parts.getOrNull(0)?.toIntOrNull() ?: 720
             var h = parts.getOrNull(1)?.toIntOrNull() ?: 1280
 
-            // Match screen orientation (if screen is portrait, make res portrait)
-            val screenIsPortrait = metrics.heightPixels > metrics.widthPixels
-            val resIsPortrait = h > w
-            if (screenIsPortrait != resIsPortrait) {
-                val temp = w
-                w = h
-                h = temp
+            if (!ignoreScreenOrientation) {
+                // Match screen orientation (if screen is portrait, make res portrait)
+                val screenIsPortrait = metrics.heightPixels > metrics.widthPixels
+                val resIsPortrait = h > w
+                if (screenIsPortrait != resIsPortrait) {
+                    val temp = w
+                    w = h
+                    h = temp
+                }
             }
             return w to h
         }
     }
 
     private fun collectStreamParams(): StreamParams {
+        val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
         val (targetW, targetH) = getTargetResolution()
         var width = targetW
         var height = targetH
@@ -2046,18 +2122,21 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "  targetRes from settings=${width}x${height}")
         Log.d(TAG, "  activeSceneId=$activeSceneId")
 
-        // FIX: Sinkronisasi Orientasi. Jika scene aktif adalah Portrait (tinggi > lebar),
-        // pastikan encoder juga Portrait meskipun HP sedang dipegang Landscape (miring).
-        val activeScene = scenes.find { it.id == activeSceneId }
-        if (activeScene != null) {
-            val sceneIsPortrait = activeScene.rootHeight > activeScene.rootWidth
-            val encoderIsPortrait = height > width
-            Log.d(TAG, "  Scene root=${activeScene.rootWidth}x${activeScene.rootHeight}")
-            if (sceneIsPortrait != encoderIsPortrait) {
-                Log.w(TAG, "  Swapping dimensions to match scene orientation")
-                val temp = width
-                width = height
-                height = temp
+        // FIX: Sinkronisasi Orientasi hanya untuk resolusi STANDAR.
+        // Jika mode CUSTOM, kita harus menghormati angka Width x Height yang diinput user 
+        // secara mutlak, tanpa peduli orientasi sensor HP atau scene.
+        if (selectedRes != "Custom") {
+            val activeScene = scenes.find { it.id == activeSceneId }
+            if (activeScene != null) {
+                val sceneIsPortrait = activeScene.rootHeight > activeScene.rootWidth
+                val encoderIsPortrait = height > width
+                Log.d(TAG, "  Scene root=${activeScene.rootWidth}x${activeScene.rootHeight}")
+                if (sceneIsPortrait != encoderIsPortrait) {
+                    Log.w(TAG, "  Swapping dimensions to match scene orientation")
+                    val temp = width
+                    width = height
+                    height = temp
+                }
             }
         }
 
