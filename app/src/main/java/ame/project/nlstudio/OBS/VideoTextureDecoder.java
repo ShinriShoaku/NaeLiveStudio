@@ -49,6 +49,7 @@ public class VideoTextureDecoder {
     private SurfaceTexture surfaceTexture;
     private Surface inputSurface;
     private volatile boolean running = false;
+    private volatile boolean pendingPlayWhenReady = false;
     private boolean isAttached = false;
     private final float[] texMatrix = new float[16];
 
@@ -97,7 +98,10 @@ public class VideoTextureDecoder {
                 exoPlayer.setRepeatMode(loop ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
                 exoPlayer.setVideoSurface(inputSurface);
                 exoPlayer.setMediaItem(MediaItem.fromUri(videoUri));
-                exoPlayer.setPlayWhenReady(false);
+                // FIX: pakai pendingPlayWhenReady (bukan hardcode false) - kalau ternyata
+                // setPlayWhenReady() sempat dipanggil sebelum runnable ini jalan, kondisi play
+                // yang diminta tetap terbawa, bukan ketimpa jadi false lagi.
+                exoPlayer.setPlayWhenReady(pendingPlayWhenReady);
 
                 exoPlayer.addListener(new Player.Listener() {
                     @Override
@@ -155,11 +159,19 @@ public class VideoTextureDecoder {
     public float[] getTexMatrix() { return texMatrix; }
 
     public void setPlayWhenReady(boolean play) {
-        if (exoPlayer != null) {
-            MAIN_HANDLER.post(() -> {
-                if (exoPlayer != null) exoPlayer.setPlayWhenReady(play);
-            });
-        }
+        // FIX: sebelumnya null-check `exoPlayer != null` dilakukan DI LUAR post() ke MAIN_HANDLER.
+        // Saat decoder baru dibuat, start() mem-post pembuatan ExoPlayer secara ASYNC ke
+        // MAIN_HANDLER (exoPlayer masih null sesaat setelah start() dipanggil). Kalau caller
+        // langsung memanggil setPlayWhenReady(true) setelah start() (seperti yang dilakukan
+        // CompositeSceneVideoSource.start() setiap ganti scene), null-check ini gagal dan
+        // perintah play() DIBUANG begitu saja tanpa retry - video background jadi freeze di
+        // frame pertama, tidak pernah auto-play. Sekarang kita SELALU post ke MAIN_HANDLER;
+        // null-check dipindah ke DALAM runnable (dieksekusi setelah runnable pembuatan ExoPlayer
+        // dari start(), karena urutan FIFO Handler yang sama) supaya perintah ini tidak hilang.
+        pendingPlayWhenReady = play;
+        MAIN_HANDLER.post(() -> {
+            if (exoPlayer != null) exoPlayer.setPlayWhenReady(play);
+        });
     }
 
     public void stop() {
