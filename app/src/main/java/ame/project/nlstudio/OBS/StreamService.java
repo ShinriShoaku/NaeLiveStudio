@@ -253,6 +253,8 @@ public class StreamService extends Service implements ConnectChecker {
     private int activeTestRecordHeight;
     private boolean isStopping = false;
 
+    private long lastOrientationCheckTime = 0;
+
     // Disimpan supaya scene bisa gonta-ganti tanpa minta izin screen-capture berkali-kali,
     // dan supaya kembali ke scene "Layar" tinggal bikin ScreenSource baru dari sini.
     private MediaProjection savedMediaProjection;
@@ -442,13 +444,20 @@ public class StreamService extends Service implements ConnectChecker {
 
     private void updateGlobalScreenBitmap(Image image) {
         try {
+            // RE-ADJUST: Jika orientasi berubah, pastikan VirtualDisplay juga menyesuaikan
+            // agar capture tidak terpotong atau gepeng di sisi internal VirtualDisplay-nya.
+            // Jika meresize, return true dan kita skip frame ini karena reader-nya sudah diganti/tutup.
+            if (checkOrientationChange(image.getWidth(), image.getHeight())) {
+                return;
+            }
+
             Image.Plane[] planes = image.getPlanes();
+            if (planes == null || planes.length == 0) return;
             java.nio.ByteBuffer buffer = planes[0].getBuffer();
             int pixelStride = planes[0].getPixelStride();
             int rowStride = planes[0].getRowStride();
             int rowPadding = rowStride - pixelStride * image.getWidth();
             int bitmapWidth = image.getWidth() + rowPadding / pixelStride;
-            
             int bitmapHeight = image.getHeight();
 
             synchronized (globalScreenLock) {
@@ -456,10 +465,6 @@ public class StreamService extends Service implements ConnectChecker {
                     if (globalScreenBitmap != null) globalScreenBitmap.recycle();
                     globalScreenBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
                     Log.d(TAG, "Created globalScreenBitmap: " + bitmapWidth + "x" + bitmapHeight);
-                    
-                    // RE-ADJUST: Jika orientasi berubah, pastikan VirtualDisplay juga menyesuaikan
-                    // agar capture tidak terpotong atau gepeng di sisi internal VirtualDisplay-nya.
-                    checkOrientationChange(image.getWidth(), image.getHeight());
                 }
                 buffer.rewind();
                 globalScreenBitmap.copyPixelsFromBuffer(buffer);
@@ -469,24 +474,78 @@ public class StreamService extends Service implements ConnectChecker {
         }
     }
 
-    private long lastOrientationCheckTime = 0;
-    private void checkOrientationChange(int currentW, int currentH) {
+    private boolean checkOrientationChange(int currentW, int currentH) {
         long now = System.currentTimeMillis();
-        if (now - lastOrientationCheckTime < 2000) return; // Debounce 2 detik biar gak lag
+        if (now - lastOrientationCheckTime < 2000) return false; // Debounce 2 detik biar gak lag
         lastOrientationCheckTime = now;
 
         if (globalVirtualDisplay != null) {
             DisplayMetrics metrics = getResources().getDisplayMetrics();
             int screenW = metrics.widthPixels;
             int screenH = metrics.heightPixels;
-            
+
             // Jika resolusi layar HP benar-benar berbeda dari resolusi capture saat ini
             if (Math.abs(screenW - currentW) > 10 || Math.abs(screenH - currentH) > 10) {
-                Log.i(TAG, "Orientation/Screen size change detected! Re-adjusting VirtualDisplay.");
-                // resize virtual display agar capture area-nya pas dengan layar baru
+                Log.i(TAG, "Orientation/Screen size change detected! Re-adjusting VirtualDisplay. "
+                        + "screen=" + screenW + "x" + screenH + " oldCap=" + globalCapW + "x" + globalCapH);
+
+                // FIX: sebelumnya di sini cuma manggil resize(globalCapW, globalCapH, ...) pakai
+                // NILAI LAMA yang sudah dihitung SEKALI di startGlobalScreenCapture() berdasarkan
+                // rasio layar SAAT ITU (portrait). Begitu HP dirotasi (misal ke landscape pas main
+                // game), rasio layar yang baru itu TIDAK dipakai buat ngitung ulang - VirtualDisplay
+                // cuma di-resize balik ke ukuran lama yang udah nggak sesuai rasio layar yang baru,
+                // jadi konten yang di-mirror ke situ jadi gepeng/kepotong (bukan full landscape).
+                //
+                // Fix-nya: hitung ULANG globalCapW/globalCapH pakai rasio layar yang BARU, dengan
+                // rumus fit-ke-designRatio yang SAMA kayak di startGlobalScreenCapture(). ImageReader
+                // juga HARUS dibikin ulang (bukan cuma VirtualDisplay.resize()) karena ImageReader
+                // tidak punya method resize - dimensinya fixed sejak dibuat lewat newInstance().
+                float designRatio = (float) savedWidth / savedHeight;
+                float screenRatio = (float) screenW / screenH;
+
+                int newCapW, newCapH;
+                if (screenRatio > designRatio) {
+                    newCapW = savedWidth;
+                    newCapH = Math.round(savedWidth / screenRatio);
+                } else {
+                    newCapH = savedHeight;
+                    newCapW = Math.round(savedHeight * screenRatio);
+                }
+                if (newCapW < 2) newCapW = 2;
+                if (newCapH < 2) newCapH = 2;
+
+                globalCapW = newCapW;
+                globalCapH = newCapH;
+
+                ImageReader oldReader = globalImageReader;
+                ImageReader newReader = ImageReader.newInstance(globalCapW, globalCapH, PixelFormat.RGBA_8888, 2);
+                if (globalScreenThread != null) {
+                    Handler capHandler = new Handler(globalScreenThread.getLooper());
+                    newReader.setOnImageAvailableListener(reader -> {
+                        try {
+                            Image image = reader.acquireLatestImage();
+                            if (image != null) {
+                                updateGlobalScreenBitmap(image);
+                                image.close();
+                            }
+                        } catch (Exception ignored) {}
+                    }, capHandler);
+                }
+
+                globalImageReader = newReader;
+                globalVirtualDisplay.setSurface(newReader.getSurface());
                 globalVirtualDisplay.resize(globalCapW, globalCapH, metrics.densityDpi);
+
+                if (oldReader != null) {
+                    oldReader.setOnImageAvailableListener(null, null);
+                    oldReader.close();
+                }
+
+                Log.i(TAG, "VirtualDisplay re-adjusted: newCap=" + globalCapW + "x" + globalCapH);
+                return true;
             }
         }
+        return false;
     }
 
     public Bitmap getGlobalScreenFrame() {
@@ -1247,14 +1306,14 @@ public class StreamService extends Service implements ConnectChecker {
                         os.write(buffer, 0, read);
                     }
                 }
-                Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show();
+                handler.post(() -> Toast.makeText(this, "Berhasil! Cek Gallery di folder Movies/NLStudio", Toast.LENGTH_LONG).show());
                 return "Rekaman Selesai & Tersimpan ke Gallery";
             }
-            Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
+            handler.post(() -> Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show());
             return "Rekaman Selesai, Gagal Simpan ke Gallery";
         } catch (Exception e) {
             Log.e(TAG, "Gagal export ke gallery", e);
-            Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show();
+            handler.post(() -> Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show());
             return "Rekaman Selesai, Gagal Simpan ke Gallery";
         }
     }
@@ -1411,80 +1470,90 @@ public class StreamService extends Service implements ConnectChecker {
         if (isStopping) return;
         isStopping = true;
 
+        // Feedback awal ke UI
+        sendStatusBroadcast("Sedang menghentikan...");
         handler.removeCallbacksAndMessages(null);
 
-        // Simpan dulu info rekaman test yang lagi aktif SEBELUM di-reset, supaya bisa di-export
-        // ke Gallery kalau memang ada rekaman test yang lagi jalan (lihat exportTestRecordToGallery()).
+        // Simpan info rekaman test sebelum dibersihkan
         boolean wasTestRecording = isTestRecording;
         String testRecordPath = activeTestRecordPath;
         String testRecordEncoderLabel = activeTestRecordEncoderLabel;
         int testRecordWidth = activeTestRecordWidth;
         int testRecordHeight = activeTestRecordHeight;
-
-        try {
-            if (rtmpStream != null && rtmpStream.isRecording()) {
-                rtmpStream.stopRecord();
-            }
-        } catch (Exception ignored) {
-        }
+        
         isTestRecording = false;
         activeTestRecordPath = null;
 
-        // FIX: sebelumnya export ke Gallery HANYA terjadi lewat callback auto-timer 30 detik
-        // (finishTestRecord()). Karena limit itu sudah dihapus di startTestRecord(), stop manual
-        // (tombol Stop di MainActivity, yang manggil stopService() -> onDestroy() -> di sini)
-        // sekarang jadi satu-satunya jalur berhenti - jadi export-nya WAJIB dijalankan di sini
-        // juga, kalau tidak file rekaman cuma nyangkut di folder temp internal dan hilang tanpa
-        // pernah masuk Gallery.
-        if (wasTestRecording && testRecordPath != null) {
-            finalMsg = exportTestRecordToGallery(testRecordPath, testRecordEncoderLabel, testRecordWidth, testRecordHeight);
-        }
-        try {
-            if (rtmpStream != null && rtmpStream.isStreaming()) {
-                rtmpStream.stopStream();
-            }
-        } catch (Exception ignored) {
-        }
-        if (audioMixSource != null) {
-            audioMixSource.stop();
-            audioMixSource = null;
-        }
-        currentSceneSource = null;
-        if (globalVirtualDisplay != null) {
-            globalVirtualDisplay.release();
-            globalVirtualDisplay = null;
-        }
-        if (globalImageReader != null) {
-            globalImageReader.close();
-            globalImageReader = null;
-        }
-        if (globalScreenThread != null) {
-            globalScreenThread.quitSafely();
-            globalScreenThread = null;
-        }
-        synchronized (globalScreenLock) {
-            if (globalScreenBitmap != null) {
-                globalScreenBitmap.recycle();
-                globalScreenBitmap = null;
-            }
-        }
-
-        if (savedMediaProjection != null) {
+        // Pindahkan SELURUH teardown ke background thread agar main thread (UI)
+        // tidak pernah ANR, meski encoder/audio record lambat merespon.
+        new Thread(() -> {
+            String msg = finalMsg;
             try {
-                savedMediaProjection.stop();
-            } catch (Exception ignored) {
+                // 1. Hentikan Encoder (Recording & Streaming) dulu
+                if (rtmpStream != null) {
+                    if (rtmpStream.isRecording()) {
+                        try { rtmpStream.stopRecord(); } catch (Exception ignored) {}
+                    }
+                    if (rtmpStream.isStreaming()) {
+                        try { rtmpStream.stopStream(); } catch (Exception ignored) {}
+                    }
+                }
+
+                // 2. Export hasil rekam jika perlu (setelah encoder beneran stop)
+                if (wasTestRecording && testRecordPath != null) {
+                    msg = exportTestRecordToGallery(testRecordPath, testRecordEncoderLabel, testRecordWidth, testRecordHeight);
+                }
+
+                // 3. Hentikan Audio Sources (ini yang paling rawan blocking native)
+                if (audioMixSource != null) {
+                    try {
+                        audioMixSource.stop();
+                    } catch (Exception e) {
+                        Log.e(TAG, "Gagal stop audioMixSource", e);
+                    }
+                    audioMixSource = null;
+                }
+
+                // 4. Bebaskan Capture Resources (VirtualDisplay & Projection)
+                if (globalVirtualDisplay != null) {
+                    globalVirtualDisplay.release();
+                    globalVirtualDisplay = null;
+                }
+                if (globalImageReader != null) {
+                    globalImageReader.close();
+                    globalImageReader = null;
+                }
+                if (globalScreenThread != null) {
+                    globalScreenThread.quitSafely();
+                    globalScreenThread = null;
+                }
+                synchronized (globalScreenLock) {
+                    if (globalScreenBitmap != null) {
+                        globalScreenBitmap.recycle();
+                        globalScreenBitmap = null;
+                    }
+                }
+                if (savedMediaProjection != null) {
+                    try { savedMediaProjection.stop(); } catch (Exception ignored) {}
+                    savedMediaProjection = null;
+                }
+
+            } catch (Exception e) {
+                Log.e(TAG, "Error in background teardown", e);
+            } finally {
+                // 5. Cleanup akhir di Main Thread
+                final String finalStatus = (msg != null ? msg : "Status: idle");
+                handler.post(() -> {
+                    currentSceneSource = null;
+                    afkHandler.removeCallbacks(afkCheckRunnable);
+                    isAfkActive = false;
+                    releaseLocks();
+                    sendStatusBroadcast(finalStatus);
+                    stopForeground(true);
+                    stopSelf();
+                });
             }
-            savedMediaProjection = null;
-        }
-
-        afkHandler.removeCallbacks(afkCheckRunnable);
-        isAfkActive = false;
-
-        releaseLocks();
-        sendStatusBroadcast(finalMsg != null ? finalMsg : "Status: idle");
-
-        stopForeground(true);
-        stopSelf();
+        }, "StreamService-Teardown").start();
     }
 
     @Override

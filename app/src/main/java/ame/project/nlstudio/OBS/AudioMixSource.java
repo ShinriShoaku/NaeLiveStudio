@@ -311,6 +311,36 @@ public class AudioMixSource extends AudioSource {
     public void stop() {
         running = false;
         stopMusicThread = true;
+
+        // FIX (ANR saat Stop Record): sebelumnya urutannya "join thread dulu, baru
+        // release() record". Kalau salah satu thread capture (mic/internal/music) lagi
+        // STUCK di dalam AudioRecord.read() secara native - misal gara-gara AudioFlinger
+        // gagal terus bikin ulang record (lihat logcat: "createRecord_l ... status -22" /
+        // "restoreRecord_l ... dead IAudioRecord", biasanya kejadian abis app sempat
+        // di-background lalu dibuka lagi) - thread itu TIDAK akan pernah selesai dalam
+        // waktu join(200ms) di bawah. Kode lama lanjut manggil record.release() SETELAH
+        // itu, padahal thread capture-nya MASIH aktif dan MASIH nge-block di dalam
+        // read() pada objek AudioRecord yang sama. release() yang dipanggil dari thread
+        // lain (di sini dari main thread, lewat StreamService.stopEverything()) jadi ikut
+        // ke-block nunggu native lock yang sama dipegang oleh read() yang stuck itu ->
+        // APLIKASI ANR pas user tekan Stop.
+        //
+        // Fix: panggil record.stop() (BUKAN release()) DULU di semua AudioRecord, SEBELUM
+        // join thread. AudioRecord.stop() dijamin aman dipanggil dari thread lain untuk
+        // "membangunkan" read() yang lagi blocking di thread lain - read() itu langsung
+        // return 0/partial read - jadi capture loop bisa segera keluar dari while(running)
+        // dan thread-nya beneran selesai SEBELUM kita release().
+        safeStopRecord(micRecord);
+        safeStopRecord(internalRecord);
+        safeStopRecord(musicRecord);
+
+        // INTERRUPT all threads first to break any sleep/wait
+        if (captureThread != null) captureThread.interrupt();
+        if (micCaptureThread != null) micCaptureThread.interrupt();
+        if (internalCaptureThread != null) internalCaptureThread.interrupt();
+        if (musicCaptureThread != null) musicCaptureThread.interrupt();
+        if (musicDecodeThread != null) musicDecodeThread.interrupt();
+
         try {
             if (captureThread != null) captureThread.join(200);
             if (micCaptureThread != null) micCaptureThread.join(200);
@@ -318,11 +348,7 @@ public class AudioMixSource extends AudioSource {
             if (musicCaptureThread != null) musicCaptureThread.join(200);
             if (musicDecodeThread != null) musicDecodeThread.join(200);
         } catch (InterruptedException ignored) {
-            if (captureThread != null) captureThread.interrupt();
-            if (micCaptureThread != null) micCaptureThread.interrupt();
-            if (internalCaptureThread != null) internalCaptureThread.interrupt();
-            if (musicCaptureThread != null) musicCaptureThread.interrupt();
-            if (musicDecodeThread != null) musicDecodeThread.interrupt();
+            // Already interrupted above
         }
         captureThread = null;
         micCaptureThread = null;
@@ -353,6 +379,18 @@ public class AudioMixSource extends AudioSource {
         stop();
     }
 
+    /** Panggil AudioRecord.stop() dengan aman - dipakai buat "membangunkan" thread capture
+     *  yang lagi blocking di read(), SEBELUM di-release(). Lihat catatan panjang di stop(). */
+    private void safeStopRecord(AudioRecord record) {
+        if (record == null) return;
+        try {
+            if (record.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
+                record.stop();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     private void releaseRecord(AudioRecord record) {
         if (record == null) return;
         try {
@@ -370,7 +408,7 @@ public class AudioMixSource extends AudioSource {
         int bytesPerFrameMono = samplesPerFrame * 2;
         byte[] monoBuf = new byte[bytesPerFrameMono];
         android.util.Log.d("AudioMixSource", "micCaptureLoop started. mono bytes=" + bytesPerFrameMono);
-        while (running) {
+        while (running && !Thread.currentThread().isInterrupted()) {
             int read = micRecord.read(monoBuf, 0, bytesPerFrameMono);
             if (read > 0) {
                 // Convert mono to stereo (copy each sample twice)
@@ -387,7 +425,10 @@ public class AudioMixSource extends AudioSource {
                 android.util.Log.e("AudioMixSource", "micCaptureLoop error: " + read);
                 break;
             } else {
-                try { Thread.sleep(10); } catch (InterruptedException e) { break; }
+                try { Thread.sleep(10); } catch (InterruptedException e) { 
+                    Thread.currentThread().interrupt();
+                    break; 
+                }
             }
         }
         android.util.Log.d("AudioMixSource", "micCaptureLoop finished.");
@@ -398,7 +439,7 @@ public class AudioMixSource extends AudioSource {
         int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
         byte[] buf = new byte[bytesPerFrame];
         android.util.Log.d("AudioMixSource", "internalCaptureLoop started.");
-        while (running) {
+        while (running && !Thread.currentThread().isInterrupted()) {
             int read = internalRecord.read(buf, 0, bytesPerFrame);
             if (read > 0) {
                 if (internalAudioQueue.size() >= 10) internalAudioQueue.poll();
@@ -407,7 +448,10 @@ public class AudioMixSource extends AudioSource {
                 android.util.Log.e("AudioMixSource", "internalCaptureLoop error: " + read);
                 break;
             } else {
-                try { Thread.sleep(10); } catch (InterruptedException e) { break; }
+                try { Thread.sleep(10); } catch (InterruptedException e) { 
+                    Thread.currentThread().interrupt();
+                    break; 
+                }
             }
         }
         android.util.Log.d("AudioMixSource", "internalCaptureLoop finished.");
@@ -423,7 +467,7 @@ public class AudioMixSource extends AudioSource {
         int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
         byte[] buf = new byte[bytesPerFrame];
         android.util.Log.d("AudioMixSource", "musicCaptureLoop (Kanae) started.");
-        while (running) {
+        while (running && !Thread.currentThread().isInterrupted()) {
             int read = musicRecord.read(buf, 0, bytesPerFrame);
             if (read > 0) {
                 if (musicAudioQueue.size() >= 10) musicAudioQueue.poll();
@@ -432,7 +476,10 @@ public class AudioMixSource extends AudioSource {
                 android.util.Log.e("AudioMixSource", "musicCaptureLoop error: " + read);
                 break;
             } else {
-                try { Thread.sleep(10); } catch (InterruptedException e) { break; }
+                try { Thread.sleep(10); } catch (InterruptedException e) { 
+                    Thread.currentThread().interrupt();
+                    break; 
+                }
             }
         }
         android.util.Log.d("AudioMixSource", "musicCaptureLoop finished.");
@@ -447,7 +494,7 @@ public class AudioMixSource extends AudioSource {
         android.util.Log.d("AudioMixSource", "mainCaptureLoop started. cadence=" + frameDurationMs + "ms");
 
         long loopCounter = 0;
-        while (running) {
+        while (running && !Thread.currentThread().isInterrupted()) {
             loopCounter++;
             long startTime = System.currentTimeMillis();
 

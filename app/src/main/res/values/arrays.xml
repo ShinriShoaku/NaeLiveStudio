@@ -31,6 +31,7 @@
         <item>1280x720 (720p)</item>
         <item>746x420 (420p)</item>
         <item>568x320 (320p)</item>
+        <item>Custom</item>
     </string-array>
 
     <string-array name="fps_options">
