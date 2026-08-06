@@ -111,10 +111,10 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
     private int overlayTextureId = 0;
     private int screenTextureId = 0;
     private final java.util.Map<VideoTextureDecoder, Integer> decoderTextures = new java.util.HashMap<>();
-    
+
     // Map untuk menyimpan Texture ID khusus Web Overlay (OES)
     private final java.util.Map<String, Integer> webOverlayTextures = new java.util.concurrent.ConcurrentHashMap<>();
-    
+
     private Bitmap overlayBuffer;
     private Canvas overlayCanvas;
     private final Object overlayLock = new Object();
@@ -298,6 +298,25 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             if (overlayBuffer != null) { overlayBuffer.recycle(); overlayBuffer = null; }
         }
         overlayNeedsInitialRender = true;
+
+        // OPTIMASI: recycle eksplisit semua Bitmap milik object ini (bukan cuma overlayBuffer),
+        // jangan andalkan GC. Aman dilakukan di sini karena drawThread SUDAH di-join di atas
+        // (tidak ada lagi yang baca bitmap ini), dan tiap Layer.bitmap/backgroundImage SELALU
+        // di-decode BARU per scene (lihat StreamService.loadBitmapFromUri/loadBitmapPreserveAspect)
+        // - tidak pernah dishare/dicache lintas CompositeSceneVideoSource, jadi tidak ada risiko
+        // "recycled bitmap masih dipakai instance lain". Tanpa ini, tiap ganti scene bikin
+        // beberapa MB data bitmap nganggur nunggu GC - di HP low-end (heap kecil, GC lebih sering
+        // & lebih berasa) ini nambah tekanan memori & bisa keliatan sebagai micro-stutter pas
+        // pindah scene.
+        if (backgroundImage != null && !backgroundImage.isRecycled()) backgroundImage.recycle();
+        for (Layer layer : layers) {
+            if (layer.bitmap != null && !layer.bitmap.isRecycled()) layer.bitmap.recycle();
+            if (layer.voiceAnimBitmaps != null) {
+                for (Bitmap b : layer.voiceAnimBitmaps.values()) {
+                    if (b != null && !b.isRecycled()) b.recycle();
+                }
+            }
+        }
     }
 
     @Override
@@ -390,10 +409,10 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
      *  Orientasi sudah ditangani secara global lewat flipMatrix saat render Canvas ke GL. */
     private static void drawScreenFrame(Canvas canvas, Bitmap frame, RectF dst, Paint paint) {
         if (frame == null || frame.isRecycled()) return;
-        
+
         float srcAspect = (float) frame.getWidth() / frame.getHeight();
         float dstAspect = dst.width() / dst.height();
-        
+
         RectF finalDst = new RectF(dst);
         if (srcAspect > dstAspect) {
             // Bitmap lebih lebar -> paskan lebar, tinggi dikurangi (bar hitam atas-bawah)
@@ -406,7 +425,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             float dx = (dst.width() - newWidth) / 2f;
             finalDst.set(dst.left + dx, dst.top, dst.right - dx, dst.bottom);
         }
-        
+
         canvas.drawBitmap(frame, null, finalDst, paint);
     }
 
@@ -460,7 +479,7 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
     private void flushOverlayCanvas() {
         if (overlayBuffer == null) return;
-        
+
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTextureId);
         GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, overlayBuffer, 0);
 
@@ -503,14 +522,14 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
                 x1, y2,
                 x2, y2
         };
-        
+
         if (layerBuffer == null) {
             layerBuffer = ByteBuffer.allocateDirect(vdata.length * 4)
                     .order(ByteOrder.nativeOrder()).asFloatBuffer();
         }
         layerBuffer.clear();
         layerBuffer.put(vdata).position(0);
-        
+
         drawTextureWithBuffer(program, texId, matrix, isOes, layerBuffer);
     }
 
@@ -587,14 +606,14 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             if (url != null) {
                 // 1. Dapatkan atau buat Texture ID OES untuk overlay ini
                 int texId = getWebOverlayTexture(id);
-                
+
                 // 2. Dapatkan entry dari Bus dengan Hardware Acceleration (VirtualDisplay)
                 KanaeWebOverlayBus.Entry entry = KanaeWebOverlayBus.getInstance().getOrLoadEntry(context, id, url, lw, lh);
-                
+
                 if (entry != null && entry.isReady) {
                     // 3. Update frame ke texture ID kita (Real-time OES dari GPU ke GPU)
                     entry.updateTexture(texId);
-                    
+
                     // 4. Gambar langsung pakai Shader OES (Smooth 60fps) dengan Blending
                     GLES20.glEnable(GLES20.GL_BLEND);
                     GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA);
@@ -737,9 +756,9 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
 
         float[] vdata = {
                 -x, -y,
-                 x, -y,
+                x, -y,
                 -x,  y,
-                 x,  y
+                x,  y
         };
 
         if (screenVertexBuffer == null) {
@@ -804,11 +823,11 @@ public class CompositeSceneVideoSource extends VideoSource implements SceneCross
             GLES20.glDeleteTextures(1, new int[]{entry.getValue()}, 0);
         }
         decoderTextures.clear();
-        
+
         // JANGAN release WebOverlay di sini.
         // Biarkan StreamService yang memanggil releaseAll() saat stream benar-benar mati,
         // supaya transisi antar scene mulus dan video tidak terhenti/race condition.
-        
+
         for (int texId : webOverlayTextures.values()) {
             GLES20.glDeleteTextures(1, new int[]{texId}, 0);
         }

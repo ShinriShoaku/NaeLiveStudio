@@ -2,6 +2,7 @@ package ame.project.nlstudio
 
 import ame.project.nlstudio.OBS.AudioLevelBus
 import ame.project.nlstudio.OBS.StreamService
+import android.app.ActivityManager
 import ame.project.nlstudio.scene.AnimationEffect
 import ame.project.nlstudio.scene.BackgroundType
 import ame.project.nlstudio.scene.EditorLayerAdapter
@@ -399,8 +400,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // FIX: Pastikan semua suara yang diputar aplikasi ini (termasuk WebView) 
+
+        // FIX: Pastikan semua suara yang diputar aplikasi ini (termasuk WebView)
         // diperbolehkan untuk ditangkap oleh system audio capture.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
@@ -565,6 +566,17 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
         unregisterReceiver(statusReceiver)
         ame.project.nlsdk.KanaeOverlayBridge.unbind(this)
+        // FIX LEAK: onStart() nge-assign lambda yang nangkap `this` (MainActivity) ke field
+        // STATIS KanaeOverlayBridge.onOverlaysUpdated/onConnectionStateChanged. Kalau tidak
+        // di-reset di sini, field statis itu (hidup selama proses app, bukan selama Activity)
+        // bakal terus nahan referensi ke instance MainActivity ini walau activity-nya sudah
+        // di-stop/destroy (misal habis rotasi layar atau balik ke launcher), sampai ada
+        // onStart() berikutnya yang menimpanya. Pakai lambda kosong (bukan null) karena
+        // KanaeOverlayBridge cuma tersedia dalam bentuk .jar ter-compile di project ini (tidak
+        // ada source .kt-nya utk dicek apakah tipenya nullable) - lambda kosong aman utk kedua
+        // kemungkinan tipe, dan tetap memutus reference ke MainActivity lama.
+        ame.project.nlsdk.KanaeOverlayBridge.onOverlaysUpdated = {}
+        ame.project.nlsdk.KanaeOverlayBridge.onConnectionStateChanged = {}
     }
 
     override fun onDestroy() {
@@ -631,6 +643,87 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** RAM total device dalam GB (perkiraan, dari ActivityManager - cukup akurat utk tujuan
+     *  info kapasitas, tidak perlu presisi byte demi byte). */
+    private fun getDeviceTotalRamGb(): Double {
+        return try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val info = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(info)
+            info.totalMem / (1024.0 * 1024.0 * 1024.0)
+        } catch (e: Exception) {
+            -1.0 // Tidak diketahui - jangan tampilkan alert kalau gagal deteksi
+        }
+    }
+
+    private fun isDeviceLowRam(): Boolean {
+        return try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            am.isLowRamDevice
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Cuma INFO buat user, TIDAK mengubah/membatasi setting apapun secara otomatis - user tetap
+     *  bebas pilih resolusi/bitrate/fps berapapun. Ini murni ngasih tau "HP kamu kemungkinan
+     *  akan kesulitan dengan kombinasi ini" berdasarkan RAM device + berat encoding yang dipilih,
+     *  supaya user paham kenapa nanti bisa lag/nge-drop frame/force-close, bukan nebak-nebak. */
+    private fun buildLowEndCapabilityWarning(width: Int, height: Int, fps: Int, bitrateKbps: Int): String? {
+        val ramGb = getDeviceTotalRamGb()
+        if (ramGb < 0) return null // Gagal deteksi RAM, jangan asal warning
+
+        val lowRamFlag = isDeviceLowRam()
+        val megapixels = (width.toLong() * height.toLong()) / 1_000_000.0
+        val cores = Runtime.getRuntime().availableProcessors()
+
+        // Tier kasar berdasarkan RAM total device. Angka batas resolusi/bitrate/fps di tiap
+        // tier itu perkiraan konservatif (compositing GPU real-time + encoder H.264/H.265
+        // berjalan BARENGAN di app ini, jadi lebih berat drpd player video biasa).
+        val reasons = mutableListOf<String>()
+        when {
+            lowRamFlag || ramGb < 2.5 -> {
+                if (megapixels > 0.92) reasons.add("resolusi ${width}x${height} (di atas 720p)")
+                if (bitrateKbps > 2500) reasons.add("bitrate ${bitrateKbps}kbps (disarankan ≤2500kbps)")
+                if (fps > 30) reasons.add("$fps fps (disarankan ≤30fps)")
+            }
+            ramGb < 3.5 -> {
+                if (megapixels > 1.5) reasons.add("resolusi ${width}x${height} (di atas ~900p)")
+                if (bitrateKbps > 4000) reasons.add("bitrate ${bitrateKbps}kbps (disarankan ≤4000kbps)")
+                if (fps > 30) reasons.add("$fps fps (disarankan ≤30fps)")
+            }
+            ramGb < 4.5 -> {
+                if (megapixels > 2.1) reasons.add("resolusi ${width}x${height} (di atas 1080p)")
+                if (bitrateKbps > 6000) reasons.add("bitrate ${bitrateKbps}kbps (disarankan ≤6000kbps)")
+            }
+            // RAM >= 4.5GB: anggap cukup mumpuni, tidak perlu warning resolusi/bitrate standar.
+        }
+
+        if (cores in 1..4 && megapixels > 0.92) {
+            reasons.add("CPU cuma $cores core (compositing scene + encoding jalan bareng, makin berat di resolusi tinggi)")
+        }
+
+        if (reasons.isEmpty()) return null
+
+        val ramLabel = if (ramGb >= 0.1) String.format("~%.1fGB", ramGb) else "tidak diketahui"
+        return "HP kamu terdeteksi RAM $ramLabel" +
+                (if (lowRamFlag) " (ditandai sistem sebagai perangkat RAM rendah)" else "") +
+                ". Setting yang dipilih mungkin berat karena:\n\n" +
+                reasons.joinToString("\n") { "• $it" } +
+                "\n\nAplikasi tetap akan pakai setting ini persis seperti yang kamu atur - tidak ada yang " +
+                "diubah otomatis. Kalau nanti kerasa lag, patah-patah, atau force-close pas live/record, " +
+                "coba turunkan resolusi/bitrate/fps di sini lagi."
+    }
+
+    private fun showLowEndWarningIfNeeded(width: Int, height: Int, fps: Int, bitrateKbps: Int) {
+        val message = buildLowEndCapabilityWarning(width, height, fps, bitrateKbps) ?: return
+        AlertDialog.Builder(this)
+            .setTitle("Info Kapasitas HP")
+            .setMessage(message)
+            .setPositiveButton("Mengerti", null)
+            .show()
+    }
+
     private fun setSpinnerValue(spinner: Spinner, value: String) {
         val adapter = spinner.adapter
         for (i in 0 until adapter.count) {
@@ -654,6 +747,11 @@ class MainActivity : AppCompatActivity() {
                 saveSettings()
                 refreshCanvasAspectRatio()
                 refreshCanvasLayers()
+
+                val (checkW, checkH) = getTargetResolution(ignoreScreenOrientation = true)
+                val checkFps = spinnerFps.selectedItem?.toString()?.split(" ")?.get(0)?.toIntOrNull() ?: 30
+                val checkBitrate = etVideoBitrate.text.toString().toIntOrNull() ?: 2500
+                showLowEndWarningIfNeeded(checkW, checkH, checkFps, checkBitrate)
             }
             .show()
     }
@@ -1135,7 +1233,7 @@ class MainActivity : AppCompatActivity() {
         val metrics = resources.displayMetrics
         val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
         val (targetW, targetH) = getTargetResolution()
-        
+
         val forced = editingForcedRootResolution
         val (rootW, rootH) = if (selectedRes == "Custom") {
             // Untuk Custom, simpan persis sesuai target resolution tanpa paksaan orientasi scene sebelumnya
@@ -1389,7 +1487,7 @@ class MainActivity : AppCompatActivity() {
         val selectedRes = if (::spinnerResolution.isInitialized) spinnerResolution.selectedItem?.toString() ?: "Native" else "Native"
         // UI Preview should ignore screen orientation for presets, and for Custom it will follow exact values
         val (targetW, targetH) = getTargetResolution(ignoreScreenOrientation = true)
-        
+
         val (rootW, rootH) = if (selectedRes == "Custom") {
             // Untuk Custom, UI preview mengikuti angka persis (misal 1280x720 jadi Landscape)
             targetW to targetH
@@ -1403,7 +1501,7 @@ class MainActivity : AppCompatActivity() {
                 targetW to targetH
             }
         }
-        
+
         val ratio = rootW.toFloat() / rootH
         Log.d(TAG, "refreshCanvasAspectRatio: root=${rootW}x${rootH} ratio=$ratio")
         sceneCanvasView.setTargetAspectRatio(ratio)
