@@ -1,7 +1,9 @@
 package ame.project.nlstudio.scene
 
 import ame.project.nlstudio.R
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.LruCache
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -22,6 +24,14 @@ class SceneAdapter(
     private val scenes = mutableListOf<Scene>()
     private var activeSceneId: String? = null
 
+    // OPTIMASI: thumbnail (180x320, lihat SceneRepository.THUMB_W/H) sebelumnya di-decode
+    // ulang dari disk SETIAP kali item RecyclerView di-bind (termasuk pas re-bind saat
+    // scroll), padahal isinya sama tiap saat. Di HP low-end dgn storage lambat, decode sync
+    // di UI thread berulang ini bikin scroll patah-patah. Cache kecil (max 24 entri, thumbnail
+    // 180x320 ARGB_8888 ~230KB/entri -> total maks ~5.5MB, aman utk heap kecil) cukup buat
+    // nutup daftar scene yang jarang lebih dari puluhan item.
+    private val thumbCache = object : LruCache<String, Bitmap>(24) {}
+
     fun submitList(newScenes: List<Scene>, activeId: String?) {
         scenes.clear()
         scenes.addAll(newScenes)
@@ -36,7 +46,7 @@ class SceneAdapter(
 
     override fun onBindViewHolder(holder: SceneViewHolder, position: Int) {
         val scene = scenes[position]
-        holder.bind(scene, scene.id == activeSceneId, onSceneClick, onSceneDelete)
+        holder.bind(scene, scene.id == activeSceneId, onSceneClick, onSceneDelete, thumbCache)
     }
 
     override fun getItemCount(): Int = scenes.size
@@ -48,13 +58,24 @@ class SceneAdapter(
         private val tvActiveBadge: TextView = itemView.findViewById(R.id.tvSceneActiveBadge)
         private val ivDelete: ImageView = itemView.findViewById(R.id.ivSceneDelete)
 
-        fun bind(scene: Scene, isActive: Boolean, onClick: (Scene) -> Unit, onDelete: (Scene) -> Unit) {
+        fun bind(
+            scene: Scene,
+            isActive: Boolean,
+            onClick: (Scene) -> Unit,
+            onDelete: (Scene) -> Unit,
+            thumbCache: LruCache<String, Bitmap>
+        ) {
             tvName.text = scene.name
 
             when (scene.backgroundType) {
                 BackgroundType.SCREEN -> ivThumb.setImageResource(android.R.drawable.ic_menu_camera)
                 else -> {
-                    val bmp = scene.thumbnailPath?.let { BitmapFactory.decodeFile(it) }
+                    val path = scene.thumbnailPath
+                    val bmp = path?.let {
+                        thumbCache.get(it) ?: BitmapFactory.decodeFile(it)?.also { decoded ->
+                            thumbCache.put(it, decoded)
+                        }
+                    }
                     if (bmp != null) ivThumb.setImageBitmap(bmp)
                     else ivThumb.setImageResource(android.R.drawable.ic_menu_gallery)
                 }
