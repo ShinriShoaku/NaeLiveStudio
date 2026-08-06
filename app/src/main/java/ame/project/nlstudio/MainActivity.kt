@@ -57,6 +57,8 @@ import ame.project.nlstudio.OBS.VideoOptimizer
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.perf.FirebasePerformance
+import com.google.firebase.perf.metrics.Trace
 import java.util.UUID
 
 
@@ -83,6 +85,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var projectionManager: MediaProjectionManager
     private lateinit var firebaseAnalytics: FirebaseAnalytics
+    private lateinit var firebasePerformance: FirebasePerformance
 
     // Top Bar UI
     private lateinit var btnSettings: android.widget.ImageButton
@@ -274,6 +277,8 @@ class MainActivity : AppCompatActivity() {
      * (lihat VideoOptimizer.optimize) jadi prosesnya instan di kunjungan berikutnya.
      */
     private fun optimizeAndSetBackgroundVideo(sourceUri: Uri) {
+        val optimizationTrace = firebasePerformance.newTrace("video_optimization")
+        optimizationTrace.start()
         val (targetW, targetH) = getTargetResolution()
 
         val dialogView = layoutInflater.inflate(R.layout.dialog_loading, null)
@@ -285,7 +290,7 @@ class MainActivity : AppCompatActivity() {
             .setCancelable(false)
             .show()
 
-        Log.d(TAG, "optimizeAndSetBackgroundVideo: source=$sourceUri target=${targetW}x$targetH")
+        // Log.d(TAG, "optimizeAndSetBackgroundVideo: source=$sourceUri target=${targetW}x$targetH")
 
         val prefs = getSharedPreferences("stream_settings", Context.MODE_PRIVATE)
         val bgScale = prefs.getString("video_bg_scale", "Default (Optimize Auto)") ?: "Default (Optimize Auto)"
@@ -299,9 +304,10 @@ class MainActivity : AppCompatActivity() {
             sceneName = etNewSceneName.text?.toString()?.trim()?.ifEmpty { null },
             listener = object : VideoOptimizer.Listener {
                 override fun onSuccess(outputUri: Uri) {
+                    optimizationTrace.stop()
                     runOnUiThread {
                         if (progressDialog.isShowing) progressDialog.dismiss()
-                        Log.d(TAG, "optimizeAndSetBackgroundVideo: sukses -> $outputUri")
+                        // Log.d(TAG, "optimizeAndSetBackgroundVideo: sukses -> $outputUri")
 
                         // Video lama (kalau ada & berupa hasil cache) sudah tidak dipakai, hapus
                         // supaya cache tidak menumpuk percuma tiap kali user ganti background.
@@ -317,7 +323,8 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onError(e: Exception) {
-                    Log.e(TAG, "optimizeAndSetBackgroundVideo: gagal", e)
+                    optimizationTrace.stop()
+                    // Log.e(TAG, "optimizeAndSetBackgroundVideo: gagal", e)
                     runOnUiThread {
                         if (progressDialog.isShowing) progressDialog.dismiss()
                         Toast.makeText(
@@ -414,18 +421,20 @@ class MainActivity : AppCompatActivity() {
         firebaseAnalytics = FirebaseAnalytics.getInstance(this)
         firebaseAnalytics.logEvent(FirebaseAnalytics.Event.APP_OPEN, null)
 
+        firebasePerformance = FirebasePerformance.getInstance()
+
         sceneRepository = SceneRepository(this)
         scenes = sceneRepository.loadScenes()
 
         // Initialize Video Disk Cache (Media3)
         VideoDiskCacheManager.getInstance(this)
 
-        Log.d(TAG, "=== onCreate ===")
-        Log.d(TAG, "DisplayMetrics: ${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}")
-        Log.d(TAG, "Orientation: ${resources.configuration.orientation}")
-        Log.d(TAG, "Loaded scenes: ${scenes.size}")
+        // Log.d(TAG, "=== onCreate ===")
+        // Log.d(TAG, "DisplayMetrics: ${resources.displayMetrics.widthPixels}x${resources.displayMetrics.heightPixels}")
+        // Log.d(TAG, "Orientation: ${resources.configuration.orientation}")
+        // Log.d(TAG, "Loaded scenes: ${scenes.size}")
         scenes.forEach { scene ->
-            Log.d(TAG, "  Scene[${scene.id}]: ${scene.name} | bg=${scene.backgroundType} | root=${scene.rootWidth}x${scene.rootHeight} | layers=${scene.layers.size}")
+            // Log.d(TAG, "  Scene[${scene.id}]: ${scene.name} | bg=${scene.backgroundType} | root=${scene.rootWidth}x${scene.rootHeight} | layers=${scene.layers.size}")
         }
 
         // Initialize adapter early to avoid UninitializedPropertyAccessException
@@ -1246,15 +1255,15 @@ class MainActivity : AppCompatActivity() {
             targetW to targetH
         }
 
-        Log.d(TAG, "=== saveCurrentEditingScene ===")
-        Log.d(TAG, "  Name=$name, existingId=$safeExistingId")
-        Log.d(TAG, "  editingForcedRootResolution=$editingForcedRootResolution")
-        Log.d(TAG, "  displayMetrics=${metrics.widthPixels}x${metrics.heightPixels}")
-        Log.d(TAG, "  FINAL rootW=$rootW, rootH=$rootH")
-        Log.d(TAG, "  editingBackgroundType=$editingBackgroundType")
-        Log.d(TAG, "  editingLayers count=${editingLayers.size}")
+        // Log.d(TAG, "=== saveCurrentEditingScene ===")
+        // Log.d(TAG, "  Name=$name, existingId=$safeExistingId")
+        // Log.d(TAG, "  editingForcedRootResolution=$editingForcedRootResolution")
+        // Log.d(TAG, "  displayMetrics=${metrics.widthPixels}x${metrics.heightPixels}")
+        // Log.d(TAG, "  FINAL rootW=$rootW, rootH=$rootH")
+        // Log.d(TAG, "  editingBackgroundType=$editingBackgroundType")
+        // Log.d(TAG, "  editingLayers count=${editingLayers.size}")
         editingLayers.forEach { layer ->
-            Log.d(TAG, "    Layer[${layer.id}]: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h} z=${layer.zIndex}")
+            // Log.d(TAG, "    Layer[${layer.id}]: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h} z=${layer.zIndex}")
         }
 
         val scene = sceneRepository.buildOrUpdateScene(
@@ -1290,7 +1299,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Reset kanvas editor ke kondisi kosong buat mulai bikin scene baru dari nol. */
     private fun resetEditingScene() {
-        Log.d(TAG, "=== resetEditingScene ===")
+        // Log.d(TAG, "=== resetEditingScene ===")
         editingSceneId = null
         editingBackgroundType = BackgroundType.COLOR
         editingBackgroundUri = null
@@ -1307,13 +1316,13 @@ class MainActivity : AppCompatActivity() {
 
     /** Load scene yang udah tersimpan ke kanvas editor, biar bisa diedit lagi (posisi layer, background, dll). */
     private fun loadSceneIntoEditor(scene: Scene) {
-        Log.d(TAG, "=== loadSceneIntoEditor ===")
-        Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
-        Log.d(TAG, "  root=${scene.rootWidth}x${scene.rootHeight}")
-        Log.d(TAG, "  bgType=${scene.backgroundType} | bgUri=${scene.backgroundUri}")
-        Log.d(TAG, "  layers=${scene.layers.size}")
+        // Log.d(TAG, "=== loadSceneIntoEditor ===")
+        // Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
+        // Log.d(TAG, "  root=${scene.rootWidth}x${scene.rootHeight}")
+        // Log.d(TAG, "  bgType=${scene.backgroundType} | bgUri=${scene.backgroundUri}")
+        // Log.d(TAG, "  layers=${scene.layers.size}")
         scene.layers.forEach { layer ->
-            Log.d(TAG, "    Layer: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h}")
+            // Log.d(TAG, "    Layer: type=${layer.type} | x=${layer.x} y=${layer.y} w=${layer.w} h=${layer.h}")
         }
 
         editingSceneId = scene.id
@@ -1336,7 +1345,7 @@ class MainActivity : AppCompatActivity() {
         val rootW = minOf(targetW, targetH)
         val rootH = maxOf(targetW, targetH)
 
-        Log.d(TAG, "=== applyPortraitPreset position=$position ===")
+        // Log.d(TAG, "=== applyPortraitPreset position=$position ===")
         editingForcedRootResolution = rootW to rootH
         rootLayoutUserTouched = false
 
@@ -1385,7 +1394,7 @@ class MainActivity : AppCompatActivity() {
         val rootW = maxOf(targetW, targetH)
         val rootH = minOf(targetW, targetH)
 
-        Log.d(TAG, "=== applyLandscapeFullPreset ===")
+        // Log.d(TAG, "=== applyLandscapeFullPreset ===")
         editingForcedRootResolution = rootW to rootH
         rootLayoutUserTouched = false
 
@@ -1503,7 +1512,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val ratio = rootW.toFloat() / rootH
-        Log.d(TAG, "refreshCanvasAspectRatio: root=${rootW}x${rootH} ratio=$ratio")
+        // Log.d(TAG, "refreshCanvasAspectRatio: root=${rootW}x${rootH} ratio=$ratio")
         sceneCanvasView.setTargetAspectRatio(ratio)
     }
 
@@ -1543,7 +1552,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        Log.d(TAG, "onConfigurationChanged: orientation=${newConfig.orientation}")
+        // Log.d(TAG, "onConfigurationChanged: orientation=${newConfig.orientation}")
         // Refresh canvas without sending switch command to service (to avoid live glitch)
         val currentScene = scenes.find { it.id == activeSceneId }
         currentScene?.let { refreshCanvasForScene(it) }
@@ -1574,8 +1583,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        Log.d(TAG, "=== switchToScene === updateService=$updateService")
-        Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
+        // Log.d(TAG, "=== switchToScene === updateService=$updateService")
+        // Log.d(TAG, "  Scene: ${scene.name} | id=${scene.id}")
 
         val params = Bundle().apply {
             putString(FirebaseAnalytics.Param.ITEM_ID, scene.id)
@@ -2075,7 +2084,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun prefetchVideoScenesSequentially(videoScenes: List<Scene>, index: Int) {
         if (index >= videoScenes.size) {
-            Log.d(TAG, "prefetchVideoScenesSequentially: selesai (${videoScenes.size} scene diproses)")
+            // Log.d(TAG, "prefetchVideoScenesSequentially: selesai (${videoScenes.size} scene diproses)")
             return
         }
 
@@ -2216,9 +2225,9 @@ class MainActivity : AppCompatActivity() {
         var width = targetW
         var height = targetH
 
-        Log.d(TAG, "=== collectStreamParams ===")
-        Log.d(TAG, "  targetRes from settings=${width}x${height}")
-        Log.d(TAG, "  activeSceneId=$activeSceneId")
+        // Log.d(TAG, "=== collectStreamParams ===")
+        // Log.d(TAG, "  targetRes from settings=${width}x${height}")
+        // Log.d(TAG, "  activeSceneId=$activeSceneId")
 
         // FIX: Sinkronisasi Orientasi hanya untuk resolusi STANDAR.
         // Jika mode CUSTOM, kita harus menghormati angka Width x Height yang diinput user 
@@ -2228,9 +2237,9 @@ class MainActivity : AppCompatActivity() {
             if (activeScene != null) {
                 val sceneIsPortrait = activeScene.rootHeight > activeScene.rootWidth
                 val encoderIsPortrait = height > width
-                Log.d(TAG, "  Scene root=${activeScene.rootWidth}x${activeScene.rootHeight}")
+                // Log.d(TAG, "  Scene root=${activeScene.rootWidth}x${activeScene.rootHeight}")
                 if (sceneIsPortrait != encoderIsPortrait) {
-                    Log.w(TAG, "  Swapping dimensions to match scene orientation")
+                    // Log.w(TAG, "  Swapping dimensions to match scene orientation")
                     val temp = width
                     width = height
                     height = temp
@@ -2256,8 +2265,8 @@ class MainActivity : AppCompatActivity() {
 
         val selectedApp = installedApps.getOrNull(spinnerGameAudioApp.selectedItemPosition)
 
-        Log.d(TAG, "  FINAL collectStreamParams: ${width}x${height} @${fps}fps | vBitrate=${vBitrateKbps}kbps | aBitrate=${aBitrateKbps}kbps")
-        Log.d(TAG, "  audioSourceIndex=$audioSourceIndex | encoderType=$encoderType | gameUid=${selectedApp?.uid ?: -1}")
+        // Log.d(TAG, "  FINAL collectStreamParams: ${width}x${height} @${fps}fps | vBitrate=${vBitrateKbps}kbps | aBitrate=${aBitrateKbps}kbps")
+        // Log.d(TAG, "  audioSourceIndex=$audioSourceIndex | encoderType=$encoderType | gameUid=${selectedApp?.uid ?: -1}")
 
         return StreamParams(
             width, height, fps, vBitrate, aBitrate, audioSourceIndex, encoderType,
@@ -2273,12 +2282,12 @@ class MainActivity : AppCompatActivity() {
 
         val activeScene = scenes.find { it.id == activeSceneId } ?: scenes.firstOrNull()
 
-        Log.d(TAG, "=== startStreamService ===")
-        Log.d(TAG, "  URL=$url")
-        Log.d(TAG, "  StreamParams: ${p.width}x${p.height} @${p.fps}fps")
-        Log.d(TAG, "  activeScene=${activeScene?.name} | id=${activeScene?.id}")
-        Log.d(TAG, "  activeScene root=${activeScene?.rootWidth}x${activeScene?.rootHeight}")
-        Log.d(TAG, "  activeScene bgType=${activeScene?.backgroundType}")
+        // Log.d(TAG, "=== startStreamService ===")
+        // Log.d(TAG, "  URL=$url")
+        // Log.d(TAG, "  StreamParams: ${p.width}x${p.height} @${p.fps}fps")
+        // Log.d(TAG, "  activeScene=${activeScene?.name} | id=${activeScene?.id}")
+        // Log.d(TAG, "  activeScene root=${activeScene?.rootWidth}x${activeScene?.rootHeight}")
+        // Log.d(TAG, "  activeScene bgType=${activeScene?.backgroundType}")
 
         val intent = Intent(this, StreamService::class.java).apply {
             action = StreamService.ACTION_START
@@ -2304,7 +2313,7 @@ class MainActivity : AppCompatActivity() {
                     putExtra(StreamService.EXTRA_SCENE_TYPE, StreamService.SCENE_COMPOSITE)
                     val sceneJson = sceneRepository.toJson(activeScene)
                     putExtra(StreamService.EXTRA_SCENE_JSON, sceneJson)
-                    Log.d(TAG, "  Sending SCENE_COMPOSITE with JSON length=${sceneJson.length}")
+                    // Log.d(TAG, "  Sending SCENE_COMPOSITE with JSON length=${sceneJson.length}")
                 }
             }
             grantScenePermissions(this, activeScene)
@@ -2340,8 +2349,8 @@ class MainActivity : AppCompatActivity() {
         val p = collectStreamParams()
         val activeScene = scenes.find { it.id == activeSceneId } ?: scenes.firstOrNull()
 
-        Log.d(TAG, "=== startTestRecordService ===")
-        Log.d(TAG, "  StreamParams: ${p.width}x${p.height} @${p.fps}fps")
+        // Log.d(TAG, "=== startTestRecordService ===")
+        // Log.d(TAG, "  StreamParams: ${p.width}x${p.height} @${p.fps}fps")
 
         val intent = Intent(this, StreamService::class.java).apply {
             action = StreamService.ACTION_TEST_RECORD

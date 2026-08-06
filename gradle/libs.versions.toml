@@ -14,6 +14,8 @@ googleGmsGoogleServices = "4.5.0"
 googleFirebaseCrashlytics = "3.0.7"
 firebaseAnalytics = "23.2.0"
 media3 = "1.5.1"
+firebasePerf = "22.0.6"
+googleFirebasePerf = "2.0.2"
 
 [libraries]
 junit = { group = "junit", name = "junit", version.ref = "junit" }
@@ -33,10 +35,12 @@ media3-database = { group = "androidx.media3", name = "media3-database", version
 media3-common = { group = "androidx.media3", name = "media3-common", version.ref = "media3" }
 media3-transformer = { group = "androidx.media3", name = "media3-transformer", version.ref = "media3" }
 media3-effect = { group = "androidx.media3", name = "media3-effect", version.ref = "media3" }
+firebase-perf = { group = "com.google.firebase", name = "firebase-perf", version.ref = "firebasePerf" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
 google-gms-google-services = { id = "com.google.gms.google-services", version.ref = "googleGmsGoogleServices" }
 google-firebase-crashlytics = { id = "com.google.firebase.crashlytics", version.ref = "googleFirebaseCrashlytics" }
+google-firebase-perf = { id = "com.google.firebase.firebase-perf", version.ref = "googleFirebasePerf" }
 

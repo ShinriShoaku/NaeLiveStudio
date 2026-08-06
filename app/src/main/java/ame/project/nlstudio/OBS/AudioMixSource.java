@@ -88,10 +88,10 @@ public class AudioMixSource extends AudioSource {
         try {
             kanaeUid = context.getPackageManager()
                     .getApplicationInfo(KANAE_PACKAGE_NAME, 0).uid;
-            android.util.Log.d("AudioMixSource", "Kanae Player terdeteksi, uid=" + kanaeUid + " -> bus Music pakai capture langsung.");
+            // android.util.Log.d("AudioMixSource", "Kanae Player terdeteksi, uid=" + kanaeUid + " -> bus Music pakai capture langsung.");
         } catch (Exception e) {
             kanaeUid = -1;
-            android.util.Log.w("AudioMixSource", "Kanae Player (" + KANAE_PACKAGE_NAME + ") tidak terpasang, bus Music fallback ke mode file lokal.");
+            // android.util.Log.w("AudioMixSource", "Kanae Player (" + KANAE_PACKAGE_NAME + ") tidak terpasang, bus Music fallback ke mode file lokal.");
         }
     }
 
@@ -114,14 +114,14 @@ public class AudioMixSource extends AudioSource {
      */
     public void setMusicUri(android.net.Uri uri) {
         if (kanaeUid > 0) {
-            android.util.Log.w("AudioMixSource", "setMusicUri() diabaikan: bus Music sedang pakai capture Kanae Player.");
+            // android.util.Log.w("AudioMixSource", "setMusicUri() diabaikan: bus Music sedang pakai capture Kanae Player.");
             return;
         }
 
         if (uri == null && musicUri == null) return;
         if (uri != null && uri.equals(musicUri)) return;
 
-        android.util.Log.d("AudioMixSource", "setMusicUri: " + uri);
+        // android.util.Log.d("AudioMixSource", "setMusicUri: " + uri);
         this.musicUri = uri;
 
         // Restart decode thread if URI changed mid-stream
@@ -191,7 +191,7 @@ public class AudioMixSource extends AudioSource {
         int minBuffer = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, ENCODING);
         bufferSizeBytes = Math.max(minBuffer, SAMPLES_PER_FRAME * 2) * 2;
 
-        android.util.Log.d("AudioMixSource", "setupRecords: minBuffer=" + minBuffer + " bufferSizeBytes=" + bufferSizeBytes);
+        // android.util.Log.d("AudioMixSource", "setupRecords: minBuffer=" + minBuffer + " bufferSizeBytes=" + bufferSizeBytes);
 
         micRecord = new AudioRecord(
                 MediaRecorder.AudioSource.MIC,
@@ -254,7 +254,7 @@ public class AudioMixSource extends AudioSource {
     @Override
     public void start(@NonNull GetMicrophoneData getMicrophoneData) {
         this.callback = getMicrophoneData;
-        android.util.Log.i("AudioMixSource", "start() called. running=" + running);
+        // android.util.Log.i("AudioMixSource", "start() called. running=" + running);
         if (running) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
@@ -266,9 +266,9 @@ public class AudioMixSource extends AudioSource {
                 }
                 running = true;
                 stopMusicThread = false;
-                android.util.Log.i("AudioMixSource", "Records started.");
+                // android.util.Log.i("AudioMixSource", "Records started.");
             } catch (Exception e) {
-                android.util.Log.e("AudioMixSource", "Exception starting records", e);
+                // android.util.Log.e("AudioMixSource", "Exception starting records", e);
                 return;
             }
 
@@ -303,7 +303,7 @@ public class AudioMixSource extends AudioSource {
             captureThread = new Thread(this::mainCaptureLoop, "AudioMixSource-main");
             captureThread.setPriority(Thread.MAX_PRIORITY);
             captureThread.start();
-            android.util.Log.i("AudioMixSource", "All threads started.");
+            // android.util.Log.i("AudioMixSource", "All threads started.");
         }
     }
 
@@ -407,7 +407,7 @@ public class AudioMixSource extends AudioSource {
         int samplesPerFrame = SAMPLES_PER_FRAME;
         int bytesPerFrameMono = samplesPerFrame * 2;
         byte[] monoBuf = new byte[bytesPerFrameMono];
-        android.util.Log.d("AudioMixSource", "micCaptureLoop started. mono bytes=" + bytesPerFrameMono);
+        // android.util.Log.d("AudioMixSource", "micCaptureLoop started. mono bytes=" + bytesPerFrameMono);
         while (running && !Thread.currentThread().isInterrupted()) {
             int read = micRecord.read(monoBuf, 0, bytesPerFrameMono);
             if (read > 0) {
@@ -422,7 +422,7 @@ public class AudioMixSource extends AudioSource {
                 if (micAudioQueue.size() >= 10) micAudioQueue.poll();
                 micAudioQueue.offer(stereoBuf);
             } else if (read < 0) {
-                android.util.Log.e("AudioMixSource", "micCaptureLoop error: " + read);
+                // android.util.Log.e("AudioMixSource", "micCaptureLoop error: " + read);
                 break;
             } else {
                 try { Thread.sleep(10); } catch (InterruptedException e) { 
@@ -431,21 +431,21 @@ public class AudioMixSource extends AudioSource {
                 }
             }
         }
-        android.util.Log.d("AudioMixSource", "micCaptureLoop finished.");
+        // android.util.Log.d("AudioMixSource", "micCaptureLoop finished.");
     }
 
     private void internalCaptureLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
         byte[] buf = new byte[bytesPerFrame];
-        android.util.Log.d("AudioMixSource", "internalCaptureLoop started.");
+        // android.util.Log.d("AudioMixSource", "internalCaptureLoop started.");
         while (running && !Thread.currentThread().isInterrupted()) {
             int read = internalRecord.read(buf, 0, bytesPerFrame);
             if (read > 0) {
                 if (internalAudioQueue.size() >= 10) internalAudioQueue.poll();
                 internalAudioQueue.offer(java.util.Arrays.copyOf(buf, read));
             } else if (read < 0) {
-                android.util.Log.e("AudioMixSource", "internalCaptureLoop error: " + read);
+                // android.util.Log.e("AudioMixSource", "internalCaptureLoop error: " + read);
                 break;
             } else {
                 try { Thread.sleep(10); } catch (InterruptedException e) { 
@@ -454,7 +454,7 @@ public class AudioMixSource extends AudioSource {
                 }
             }
         }
-        android.util.Log.d("AudioMixSource", "internalCaptureLoop finished.");
+        // android.util.Log.d("AudioMixSource", "internalCaptureLoop finished.");
     }
 
     /**
@@ -466,14 +466,14 @@ public class AudioMixSource extends AudioSource {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
         byte[] buf = new byte[bytesPerFrame];
-        android.util.Log.d("AudioMixSource", "musicCaptureLoop (Kanae) started.");
+        // android.util.Log.d("AudioMixSource", "musicCaptureLoop (Kanae) started.");
         while (running && !Thread.currentThread().isInterrupted()) {
             int read = musicRecord.read(buf, 0, bytesPerFrame);
             if (read > 0) {
                 if (musicAudioQueue.size() >= 10) musicAudioQueue.poll();
                 musicAudioQueue.offer(java.util.Arrays.copyOf(buf, read));
             } else if (read < 0) {
-                android.util.Log.e("AudioMixSource", "musicCaptureLoop error: " + read);
+                // android.util.Log.e("AudioMixSource", "musicCaptureLoop error: " + read);
                 break;
             } else {
                 try { Thread.sleep(10); } catch (InterruptedException e) { 
@@ -482,7 +482,7 @@ public class AudioMixSource extends AudioSource {
                 }
             }
         }
-        android.util.Log.d("AudioMixSource", "musicCaptureLoop finished.");
+        // android.util.Log.d("AudioMixSource", "musicCaptureLoop finished.");
     }
 
     private void mainCaptureLoop() {
@@ -491,7 +491,7 @@ public class AudioMixSource extends AudioSource {
         byte[] mixedBuf = new byte[bytesPerFrame];
         long frameDurationMs = (SAMPLES_PER_FRAME * 1000L) / sampleRate;
 
-        android.util.Log.d("AudioMixSource", "mainCaptureLoop started. cadence=" + frameDurationMs + "ms");
+        // android.util.Log.d("AudioMixSource", "mainCaptureLoop started. cadence=" + frameDurationMs + "ms");
 
         long loopCounter = 0;
         while (running && !Thread.currentThread().isInterrupted()) {
@@ -517,9 +517,7 @@ public class AudioMixSource extends AudioSource {
                     musicBuf != null ? musicBuf : new byte[0], musicLen);
 
             if (loopCounter % 100 == 0) {
-                android.util.Log.v("AudioMixSource", "mainCaptureLoop status: micQ=" + micAudioQueue.size()
-                        + " sysQ=" + internalAudioQueue.size() + " musQ=" + musicAudioQueue.size()
-                        + " micEnabled=" + micEnabled + " sysEnabled=" + internalEnabled + " musEnabled=" + musicEnabled);
+                // android.util.Log.v("AudioMixSource", "mainCaptureLoop status: micQ=" + micAudioQueue.size() + " sysQ=" + internalAudioQueue.size() + " musQ=" + musicAudioQueue.size() + " micEnabled=" + micEnabled + " sysEnabled=" + internalEnabled + " musEnabled=" + musicEnabled);
             }
 
             // Jaga cadence waktu
@@ -529,7 +527,7 @@ public class AudioMixSource extends AudioSource {
                 try { Thread.sleep(sleepTime); } catch (InterruptedException e) { break; }
             }
         }
-        android.util.Log.d("AudioMixSource", "mainCaptureLoop finished.");
+        // android.util.Log.d("AudioMixSource", "mainCaptureLoop finished.");
     }
 
     private void publishLevelsThrottled(byte[] micBuf, int micLen, byte[] internalBuf, int internalLen, byte[] musicBuf, int musicLen) {
@@ -584,7 +582,7 @@ public class AudioMixSource extends AudioSource {
      */
     private void musicDecodeLoop() {
         if (musicUri == null) return;
-        android.util.Log.d("AudioMixSource", "musicDecodeLoop: Starting for URI: " + musicUri);
+        // android.util.Log.d("AudioMixSource", "musicDecodeLoop: Starting for URI: " + musicUri);
         android.media.MediaExtractor extractor = new android.media.MediaExtractor();
         android.media.MediaCodec codec = null;
         try {
@@ -599,7 +597,7 @@ public class AudioMixSource extends AudioSource {
                 }
             }
             if (audioTrackIndex < 0) {
-                android.util.Log.e("AudioMixSource", "musicDecodeLoop: No audio track found in " + musicUri);
+                // android.util.Log.e("AudioMixSource", "musicDecodeLoop: No audio track found in " + musicUri);
                 return;
             }
             extractor.selectTrack(audioTrackIndex);
@@ -614,7 +612,7 @@ public class AudioMixSource extends AudioSource {
             codec = android.media.MediaCodec.createDecoderByType(mime);
             codec.configure(format, null, null, 0);
             codec.start();
-            android.util.Log.d("AudioMixSource", "musicDecodeLoop: Decoder started. mime=" + mime);
+            // android.util.Log.d("AudioMixSource", "musicDecodeLoop: Decoder started. mime=" + mime);
 
             android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
             int bytesPerFrame = SAMPLES_PER_FRAME * channelCount * 2;
@@ -689,18 +687,18 @@ public class AudioMixSource extends AudioSource {
                         }
 
                         if (totalFramesPushed % 1000 == 0 && totalFramesPushed > 0) {
-                            android.util.Log.v("AudioMixSource", "musicDecodeLoop: pushed " + totalFramesPushed + " frames");
+                            // android.util.Log.v("AudioMixSource", "musicDecodeLoop: pushed " + totalFramesPushed + " frames");
                         }
                     }
                     codec.releaseOutputBuffer(outputIndex, false);
                 } else if (outputIndex == android.media.MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     android.media.MediaFormat newFormat = codec.getOutputFormat();
                     currentChannels = newFormat.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT);
-                    android.util.Log.i("AudioMixSource", "musicDecodeLoop: Format changed: " + newFormat);
+                    // android.util.Log.i("AudioMixSource", "musicDecodeLoop: Format changed: " + newFormat);
                 }
 
                 if ((info.flags & android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                    android.util.Log.d("AudioMixSource", "musicDecodeLoop: Looping");
+                    // android.util.Log.d("AudioMixSource", "musicDecodeLoop: Looping");
                     extractor.seekTo(0, android.media.MediaExtractor.SEEK_TO_CLOSEST_SYNC);
                     codec.flush();
                     accumulatorPos = 0;
@@ -708,7 +706,7 @@ public class AudioMixSource extends AudioSource {
                 }
             }
         } catch (Exception e) {
-            android.util.Log.e("AudioMixSource", "musicDecodeLoop error", e);
+            // android.util.Log.e("AudioMixSource", "musicDecodeLoop error", e);
         } finally {
             if (codec != null) { try { codec.stop(); codec.release(); } catch(Exception ignored){} }
             extractor.release();

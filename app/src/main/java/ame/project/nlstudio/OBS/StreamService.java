@@ -43,6 +43,8 @@ import ame.project.nlstudio.R;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import com.google.firebase.perf.FirebasePerformance;
+import com.google.firebase.perf.metrics.Trace;
 import com.pedro.common.ConnectChecker;
 import com.pedro.encoder.input.sources.audio.MicrophoneSource;
 import com.pedro.encoder.input.sources.audio.MixAudioSource;
@@ -125,11 +127,11 @@ public class StreamService extends Service implements ConnectChecker {
      */
     private void logResolutionGetters(Object obj, String label) {
         if (obj == null) {
-            Log.d(TAG, "reflect[" + label + "]: object null, skip");
+            // Log.d(TAG, "reflect[" + label + "]: object null, skip");
             return;
         }
         try {
-            Log.d(TAG, "reflect[" + label + "]: class=" + obj.getClass().getName());
+            // Log.d(TAG, "reflect[" + label + "]: class=" + obj.getClass().getName());
             for (java.lang.reflect.Method m : obj.getClass().getMethods()) {
                 String lower = m.getName().toLowerCase();
                 if (m.getParameterCount() == 0
@@ -137,14 +139,14 @@ public class StreamService extends Service implements ConnectChecker {
                     try {
                         m.setAccessible(true);
                         Object result = m.invoke(obj);
-                        Log.d(TAG, "reflect[" + label + "]: " + m.getName() + "() = " + result);
+                        // Log.d(TAG, "reflect[" + label + "]: " + m.getName() + "() = " + result);
                     } catch (Exception ignoredInner) {
                         // beberapa getter mungkin butuh state tertentu (misal harus streaming dulu), skip aja
                     }
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "reflect[" + label + "]: gagal total", e);
+            // Log.e(TAG, "reflect[" + label + "]: gagal total", e);
         }
     }
 
@@ -177,9 +179,9 @@ public class StreamService extends Service implements ConnectChecker {
                     try {
                         m.setAccessible(true);
                         Object result = m.invoke(glInterface);
-                        Log.d(TAG, "reflect[glInterface/" + label + "]: method " + m.getName() + "() = " + result);
+                        // Log.d(TAG, "reflect[glInterface/" + label + "]: method " + m.getName() + "() = " + result);
                     } catch (Exception ignoredInner) {
-                        Log.d(TAG, "reflect[glInterface/" + label + "]: method " + m.getName() + "() gagal dipanggil (butuh state lain)");
+                        // Log.d(TAG, "reflect[glInterface/" + label + "]: method " + m.getName() + "() gagal dipanggil (butuh state lain)");
                     }
                 }
             }
@@ -194,14 +196,14 @@ public class StreamService extends Service implements ConnectChecker {
                     try {
                         f.setAccessible(true);
                         Object result = f.get(glInterface);
-                        Log.d(TAG, "reflect[glInterface/" + label + "]: field " + f.getName() + " = " + result);
+                        // Log.d(TAG, "reflect[glInterface/" + label + "]: field " + f.getName() + " = " + result);
                     } catch (Exception ignoredInner) {
-                        Log.d(TAG, "reflect[glInterface/" + label + "]: field " + f.getName() + " gagal dibaca");
+                        // Log.d(TAG, "reflect[glInterface/" + label + "]: field " + f.getName() + " gagal dibaca");
                     }
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "reflect[glInterface/" + label + "]: gagal total", e);
+            // Log.e(TAG, "reflect[glInterface/" + label + "]: gagal total", e);
         }
     }
 
@@ -291,7 +293,7 @@ public class StreamService extends Service implements ConnectChecker {
             kanaeBound = true;
             try {
                 kanaeService.registerCallback(kanaeCallback);
-                Log.d(TAG, "Kanae service terhubung, callback TikTok terdaftar");
+                // Log.d(TAG, "Kanae service terhubung, callback TikTok terdaftar");
 
                 // Request initial data
                 kanaeService.requestQueue();
@@ -300,13 +302,13 @@ public class StreamService extends Service implements ConnectChecker {
                     MusicBus.getInstance().onCurrentSongUpdate(currentSong);
                 }
             } catch (Exception e) {
-                Log.e(TAG, "Gagal registerCallback ke Kanae", e);
+                // Log.e(TAG, "Gagal registerCallback ke Kanae", e);
             }
         }
 
         @Override
         public void onServiceDisconnected(android.content.ComponentName name) {
-            Log.d(TAG, "Kanae service terputus");
+            // Log.d(TAG, "Kanae service terputus");
             kanaeService = null;
             kanaeBound = false;
         }
@@ -366,7 +368,7 @@ public class StreamService extends Service implements ConnectChecker {
 
         @Override
         public void onCustomOverlaysChanged(String overlaysJson) {
-            Log.d(TAG, "Custom overlays updated from Kanae");
+            // Log.d(TAG, "Custom overlays updated from Kanae");
         }
     };
 
@@ -376,9 +378,9 @@ public class StreamService extends Service implements ConnectChecker {
             Intent intent = new Intent(KANAE_SERVICE_ACTION);
             intent.setPackage(KANAE_SERVICE_PACKAGE);
             boolean ok = bindService(intent, kanaeConnection, Context.BIND_AUTO_CREATE);
-            Log.d(TAG, "bindKanaeService: bindService() = " + ok);
+            // Log.d(TAG, "bindKanaeService: bindService() = " + ok);
         } catch (Exception e) {
-            Log.e(TAG, "bindKanaeService gagal", e);
+            // Log.e(TAG, "bindKanaeService gagal", e);
         }
     }
 
@@ -398,7 +400,7 @@ public class StreamService extends Service implements ConnectChecker {
 
     public void startGlobalScreenCapture(MediaProjection mp) {
         if (globalVirtualDisplay != null || mp == null) return;
-        Log.d(TAG, "startGlobalScreenCapture: initializing VirtualDisplay for Android 14+");
+        // Log.d(TAG, "startGlobalScreenCapture: initializing VirtualDisplay for Android 14+");
 
         DisplayMetrics metrics = getResources().getDisplayMetrics();
         int screenW = metrics.widthPixels;
@@ -464,13 +466,13 @@ public class StreamService extends Service implements ConnectChecker {
                 if (globalScreenBitmap == null || globalScreenBitmap.getWidth() != bitmapWidth || globalScreenBitmap.getHeight() != bitmapHeight) {
                     if (globalScreenBitmap != null) globalScreenBitmap.recycle();
                     globalScreenBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
-                    Log.d(TAG, "Created globalScreenBitmap: " + bitmapWidth + "x" + bitmapHeight);
+                    // Log.d(TAG, "Created globalScreenBitmap: " + bitmapWidth + "x" + bitmapHeight);
                 }
                 buffer.rewind();
                 globalScreenBitmap.copyPixelsFromBuffer(buffer);
             }
         } catch (Exception e) {
-            Log.e(TAG, "updateGlobalScreenBitmap error", e);
+            // Log.e(TAG, "updateGlobalScreenBitmap error", e);
         }
     }
 
@@ -608,9 +610,9 @@ public class StreamService extends Service implements ConnectChecker {
     @Override
     public void onTrimMemory(int level) {
         super.onTrimMemory(level);
-        Log.w(TAG, "onTrimMemory level: " + level);
+        // Log.w(TAG, "onTrimMemory level: " + level);
         if (level >= TRIM_MEMORY_RUNNING_LOW) {
-            Log.w(TAG, "System memory running low, streaming might be affected");
+            // Log.w(TAG, "System memory running low, streaming might be affected");
         }
     }
 
@@ -666,8 +668,7 @@ public class StreamService extends Service implements ConnectChecker {
             String initialSceneType = intent.getStringExtra(EXTRA_SCENE_TYPE);
             String initialSceneJson = intent.getStringExtra(EXTRA_SCENE_JSON);
 
-            Log.d(TAG, "onStartCommand: EXTRA_WIDTH/HEIGHT from intent = " + width + "x" + height
-                    + " | sceneType=" + initialSceneType);
+            // Log.d(TAG, "onStartCommand: EXTRA_WIDTH/HEIGHT from intent = " + width + "x" + height + " | sceneType=" + initialSceneType);
 
             // FIX: SEBELUMNYA di sini ada logika yang "mengintip" rootWidth/rootHeight dari
             // sceneJson dan MENIMPA width/height di atas kalau ada. Itu BUG: rootWidth/rootHeight
@@ -691,18 +692,14 @@ public class StreamService extends Service implements ConnectChecker {
             if (width <= 0) width = originalWidth - (originalWidth % 2);
             if (height <= 0) height = originalHeight - (originalHeight % 2);
             if (width != originalWidth || height != originalHeight) {
-                Log.d(TAG, "onStartCommand: resolusi di-align ke kelipatan 16 utk hindari macroblock "
-                        + "mismatch di hardware encoder: " + originalWidth + "x" + originalHeight
-                        + " -> " + width + "x" + height);
+                // Log.d(TAG, "onStartCommand: resolusi di-align ke kelipatan 16 utk hindari macroblock mismatch di hardware encoder: " + originalWidth + "x" + originalHeight + " -> " + width + "x" + height);
             }
 
             savedWidth = width;
             savedHeight = height;
             savedFps = fps;
 
-            Log.d(TAG, "onStartCommand: FINAL width/height dipakai buat prepareVideo() = "
-                    + savedWidth + "x" + savedHeight + " (orientation="
-                    + (savedWidth > savedHeight ? "LANDSCAPE" : "PORTRAIT") + ")");
+            // Log.d(TAG, "onStartCommand: FINAL width/height dipakai buat prepareVideo() = " + savedWidth + "x" + savedHeight + " (orientation=" + (savedWidth > savedHeight ? "LANDSCAPE" : "PORTRAIT") + ")");
 
             // Optimasi: Pre-warm Web Overlays dari initial scene
             if (SCENE_COMPOSITE.equals(initialSceneType) && initialSceneJson != null) {
@@ -762,26 +759,28 @@ public class StreamService extends Service implements ConnectChecker {
                                 int vBitrate, int aBitrate, int audioSourceIndex, int encoderType,
                                 float micGain, float systemGain, float musicGain, int gameUid,
                                 String initialSceneType, String initialSceneJson) {
+        Trace startTrace = FirebasePerformance.getInstance().newTrace("start_streaming");
+        startTrace.start();
+
         if (rtmpStream.isStreaming() || data == null || rtmpUrl == null || rtmpUrl.isEmpty()) {
+            startTrace.stop();
             return;
         }
 
         applyEncoderType(encoderType);
 
         // KOREKSI: sebelumnya SALAH. RtmpStream (extends StreamBase, BUKAN Camera2Base)
-        Log.d(TAG, "startStreaming: MEMANGGIL rtmpStream.prepareVideo(width=" + width
-                + ", height=" + height + ", bitrate=" + vBitrate + ", fps=" + fps
-                + ", iFrameInterval=2) <- dikembalikan ke urutan asli, ini yg benar utk RtmpStream");
+        // Log.d(TAG, "startStreaming: MEMANGGIL rtmpStream.prepareVideo(width=" + width + ", height=" + height + ", bitrate=" + vBitrate + ", fps=" + fps + ", iFrameInterval=2) <- dikembalikan ke urutan asli, ini yg benar utk RtmpStream");
         boolean videoOk = rtmpStream.prepareVideo(width, height, vBitrate, fps, 2);
-        Log.d(TAG, "startStreaming: prepareVideo() returned videoOk=" + videoOk);
-        logResolutionGetters(rtmpStream, "rtmpStream setelah prepareVideo");
+        // Log.d(TAG, "startStreaming: prepareVideo() returned videoOk=" + videoOk);
+        // logResolutionGetters(rtmpStream, "rtmpStream setelah prepareVideo");
 
         // FIX: Hapus paksaan AspectRatioMode.NONE di sini agar tidak konflik dengan applyGlProperties()
         // dan pastikan setRotation(0) agar tidak menebak orientasi dari sensor.
         try {
             // Kode lama dipindah ke applyGlProperties()
         } catch (Exception e) {
-            Log.e(TAG, "startStreaming: gagal set GL properties", e);
+            // Log.e(TAG, "startStreaming: gagal set GL properties", e);
         }
 
         boolean audioOk = true;
@@ -821,6 +820,7 @@ public class StreamService extends Service implements ConnectChecker {
         applyGlProperties();
 
         rtmpStream.startStream(rtmpUrl);
+        startTrace.stop();
     }
 
     private void applyGlProperties() {
@@ -851,10 +851,9 @@ public class StreamService extends Service implements ConnectChecker {
             // Method resmi di GlInterface, tidak perlu reflection.
             glInterface.setForceRender(true);
 
-            Log.d(TAG, "applyGlProperties: Rotation=0, AspectRatioMode=NONE, StreamViewPort="
-                    + savedWidth + "x" + savedHeight + ", ForceRender=true, AutoOrient=false");
+            // Log.d(TAG, "applyGlProperties: Rotation=0, AspectRatioMode=NONE, StreamViewPort=" + savedWidth + "x" + savedHeight + ", ForceRender=true, AutoOrient=false");
         } catch (Exception e) {
-            Log.e(TAG, "applyGlProperties: gagal", e);
+            // Log.e(TAG, "applyGlProperties: gagal", e);
         }
     }
 
@@ -883,9 +882,10 @@ public class StreamService extends Service implements ConnectChecker {
     }
 
     private void switchScene(String scene, Uri uri, String sceneJson, Bitmap afkBitmap) {
-        Log.d(TAG, "switchScene: scene=" + scene + " uri=" + uri
-                + " sceneJson=" + sceneJson + " afkBitmap=" + (afkBitmap != null)
-                + " savedWidth/Height=" + savedWidth + "x" + savedHeight);
+        Trace switchTrace = FirebasePerformance.getInstance().newTrace("switch_scene");
+        switchTrace.start();
+
+        // Log.d(TAG, "switchScene: scene=" + scene + " uri=" + uri + " sceneJson=" + sceneJson + " afkBitmap=" + (afkBitmap != null) + " savedWidth/Height=" + savedWidth + "x" + savedHeight);
         if (scene == null || savedMediaProjection == null) return;
 
         // Snapshot frame terakhir dari scene yang MASIH aktif sekarang, diambil SEBELUM di-stop().
@@ -945,8 +945,10 @@ public class StreamService extends Service implements ConnectChecker {
                     fadeSnapshot.recycle();
                 }
 
+                switchTrace.stop();
             } catch (Exception e) {
-                Log.e(TAG, "Gagal ganti scene", e);
+                switchTrace.stop();
+                // Log.e(TAG, "Gagal ganti scene", e);
                 if (fadeSnapshot != null && !fadeSnapshot.isRecycled()) fadeSnapshot.recycle();
                 handler.post(() -> Toast.makeText(this,
                         "Gagal ganti scene: " + e.getMessage(), Toast.LENGTH_SHORT).show());
@@ -964,7 +966,7 @@ public class StreamService extends Service implements ConnectChecker {
             try {
                 return ((SceneCrossfadeSupport) src).peekCurrentFrame();
             } catch (Exception e) {
-                Log.w(TAG, "captureCurrentSceneSnapshot: gagal ambil snapshot, lanjut tanpa fade", e);
+                // Log.w(TAG, "captureCurrentSceneSnapshot: gagal ambil snapshot, lanjut tanpa fade", e);
             }
         }
         return null;
@@ -989,9 +991,7 @@ public class StreamService extends Service implements ConnectChecker {
         // switchScene() SUDAH benar pakai savedWidth/savedHeight - composite path ini disamakan.
         int rootW = savedWidth;
         int rootH = savedHeight;
-        Log.d(TAG, "applyCompositeScene: JSON rootWidth/Height=" + o.optInt("rootWidth", -1) + "x"
-                + o.optInt("rootHeight", -1) + " (DIABAIKAN) -> DIPAKAI savedWidth/Height (encoder aktual)="
-                + rootW + "x" + rootH);
+        // Log.d(TAG, "applyCompositeScene: JSON rootWidth/Height=" + o.optInt("rootWidth", -1) + "x" + o.optInt("rootHeight", -1) + " (DIABAIKAN) -> DIPAKAI savedWidth/Height (encoder aktual)=" + rootW + "x" + rootH);
 
         CompositeSceneVideoSource.BackgroundType bgType;
         Bitmap backgroundImage = null;
@@ -1063,7 +1063,7 @@ public class StreamService extends Service implements ConnectChecker {
                         && !"MUSIC".equals(layerType) && !"EFFECT".equals(layerType)
                         && !"KANAE_WEB".equals(layerType)) continue;
 
-                Log.d(TAG, "Adding composite layer: " + layerType + " uri=" + lo.optString("uri", ""));
+                // Log.d(TAG, "Adding composite layer: " + layerType + " uri=" + lo.optString("uri", ""));
                 CompositeSceneVideoSource.Layer layer = new CompositeSceneVideoSource.Layer(
                         bmp,
                         lo.optString("uri", ""),
@@ -1094,7 +1094,7 @@ public class StreamService extends Service implements ConnectChecker {
             audioMixSource.setMusicUri(bgMusicUri);
             boolean internalEnabled = o.optBoolean("internalAudioEnabled", true);
             audioMixSource.setInternalEnabled(internalEnabled);
-            Log.d(TAG, "Applied Music URI: " + bgMusicUri + ", Internal Audio: " + internalEnabled);
+            // Log.d(TAG, "Applied Music URI: " + bgMusicUri + ", Internal Audio: " + internalEnabled);
         }
 
         CompositeSceneVideoSource source = new CompositeSceneVideoSource(
@@ -1103,8 +1103,8 @@ public class StreamService extends Service implements ConnectChecker {
         rtmpStream.changeVideoSource(source);
         currentSceneSource = source;
         applyGlProperties();
-        logResolutionGetters(rtmpStream, "rtmpStream setelah changeVideoSource(composite)");
-        logGlInterfaceState("setelah changeVideoSource(composite)");
+        // logResolutionGetters(rtmpStream, "rtmpStream setelah changeVideoSource(composite)");
+        // logGlInterfaceState("setelah changeVideoSource(composite)");
     }
 
 
@@ -1149,7 +1149,7 @@ public class StreamService extends Service implements ConnectChecker {
                 return BitmapFactory.decodeStream(decodeStream, null, decodeOptions);
             }
         } catch (Exception e) {
-            Log.w(TAG, "decodeSampledBitmapFromUri gagal: " + e.getMessage());
+            // Log.w(TAG, "decodeSampledBitmapFromUri gagal: " + e.getMessage());
             return null;
         }
     }
@@ -1250,8 +1250,7 @@ public class StreamService extends Service implements ConnectChecker {
 
         applyEncoderType(encoderType);
 
-        Log.d(TAG, "startTestRecord: prepareVideo(width=" + width + ", height=" + height
-                + ", bitrate=" + vBitrate + ", fps=" + fps + ", iFrameInterval=2)");
+        // Log.d(TAG, "startTestRecord: prepareVideo(width=" + width + ", height=" + height + ", bitrate=" + vBitrate + ", fps=" + fps + ", iFrameInterval=2)");
         boolean videoOk = rtmpStream.prepareVideo(width, height, vBitrate, fps, 2);
 
         boolean audioOk = true;
@@ -1351,7 +1350,7 @@ public class StreamService extends Service implements ConnectChecker {
             handler.post(() -> Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show());
             return "Rekaman Selesai, Gagal Simpan ke Gallery";
         } catch (Exception e) {
-            Log.e(TAG, "Gagal export ke gallery", e);
+            // Log.e(TAG, "Gagal export ke gallery", e);
             handler.post(() -> Toast.makeText(this, "Rekam selesai, tapi gagal pindah ke Gallery", Toast.LENGTH_SHORT).show());
             return "Rekaman Selesai, Gagal Simpan ke Gallery";
         }
@@ -1391,7 +1390,7 @@ public class StreamService extends Service implements ConnectChecker {
             mediaProjection.registerCallback(new MediaProjection.Callback() {
                 @Override
                 public void onStop() {
-                    Log.d(TAG, "MediaProjection stopped");
+                    // Log.d(TAG, "MediaProjection stopped");
                 }
             }, handler);
         }
@@ -1400,7 +1399,7 @@ public class StreamService extends Service implements ConnectChecker {
 
     private void updateInternalAudioMuteState(boolean enabled) {
         if (audioMixSource != null) {
-            Log.d(TAG, "updateInternalAudioMuteState: " + enabled);
+            // Log.d(TAG, "updateInternalAudioMuteState: " + enabled);
             audioMixSource.setInternalEnabled(enabled);
         }
     }
@@ -1490,14 +1489,14 @@ public class StreamService extends Service implements ConnectChecker {
                         if (url != null) {
                             int lw = Math.max(1, (int)(lo.getDouble("w") * savedWidth));
                             int lh = Math.max(1, (int)(lo.getDouble("h") * savedHeight));
-                            Log.d(TAG, "Pre-warming web overlay: " + id + " (" + lw + "x" + lh + ")");
+                            // Log.d(TAG, "Pre-warming web overlay: " + id + " (" + lw + "x" + lh + ")");
                             KanaeWebOverlayBus.getInstance().prewarm(this, id, url, lw, lh);
                         }
                     }
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "Gagal pre-warm web overlays", e);
+            // Log.e(TAG, "Gagal pre-warm web overlays", e);
         }
     }
 
@@ -1548,7 +1547,7 @@ public class StreamService extends Service implements ConnectChecker {
                     try {
                         audioMixSource.stop();
                     } catch (Exception e) {
-                        Log.e(TAG, "Gagal stop audioMixSource", e);
+                        // Log.e(TAG, "Gagal stop audioMixSource", e);
                     }
                     audioMixSource = null;
                 }
@@ -1578,7 +1577,7 @@ public class StreamService extends Service implements ConnectChecker {
                 }
 
             } catch (Exception e) {
-                Log.e(TAG, "Error in background teardown", e);
+                // Log.e(TAG, "Error in background teardown", e);
             } finally {
                 // 5. Cleanup akhir di Main Thread
                 final String finalStatus = (msg != null ? msg : "Status: idle");
@@ -1659,7 +1658,7 @@ public class StreamService extends Service implements ConnectChecker {
         // lagi aktif — jangan nunggu cache turun ke bawah 30 di polling berikutnya, karena
         // itu yang bikin "kadang stuck" walau sinyal udah bagus.
         if (isAfkActive) {
-            Log.i(TAG, "onConnectionSuccess: koneksi pulih, keluar dari AFK mode.");
+            // Log.i(TAG, "onConnectionSuccess: koneksi pulih, keluar dari AFK mode.");
             exitAfkMode();
         }
     }
@@ -1667,14 +1666,14 @@ public class StreamService extends Service implements ConnectChecker {
     @Override
     public void onConnectionFailed(String reason) {
         if (!isAfkActive && !isStopping) {
-            Log.w(TAG, "Connection failed, entering AFK mode automatically.");
+            // Log.w(TAG, "Connection failed, entering AFK mode automatically.");
             enterAfkMode();
         }
 
         if (retryCount < MAX_RETRIES && !isStopping && lastRtmpUrl != null && !lastRtmpUrl.isEmpty()) {
             retryCount++;
             sendStatusBroadcast("Koneksi terputus, mencoba lagi (" + retryCount + ")...");
-            Log.w(TAG, "onConnectionFailed: retry " + retryCount + " for " + lastRtmpUrl + " reason: " + reason);
+            // Log.w(TAG, "onConnectionFailed: retry " + retryCount + " for " + lastRtmpUrl + " reason: " + reason);
             handler.postDelayed(() -> {
                 if (rtmpStream != null && !rtmpStream.isStreaming() && !isStopping) {
                     rtmpStream.startStream(lastRtmpUrl);
