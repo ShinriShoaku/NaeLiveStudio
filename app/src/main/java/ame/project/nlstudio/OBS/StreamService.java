@@ -669,22 +669,18 @@ public class StreamService extends Service implements ConnectChecker {
             Log.d(TAG, "onStartCommand: EXTRA_WIDTH/HEIGHT from intent = " + width + "x" + height
                     + " | sceneType=" + initialSceneType);
 
-            // Jika ada scene JSON, kita bisa intip resolusi root-nya sebelum prepareVideo
-            if (initialSceneJson != null) {
-                try {
-                    JSONObject o = new JSONObject(initialSceneJson);
-                    int rootW = o.optInt("rootWidth", -1);
-                    int rootH = o.optInt("rootHeight", -1);
-                    Log.d(TAG, "onStartCommand: sceneJson rootWidth=" + rootW + " rootHeight=" + rootH
-                            + " (raw json=" + initialSceneJson + ")");
-                    if (rootW > 0 && rootH > 0) {
-                        width = rootW;
-                        height = rootH;
-                    }
-                } catch (Exception e) {
-                    Log.e(TAG, "onStartCommand: gagal parse sceneJson buat intip rootWidth/Height", e);
-                }
-            }
+            // FIX: SEBELUMNYA di sini ada logika yang "mengintip" rootWidth/rootHeight dari
+            // sceneJson dan MENIMPA width/height di atas kalau ada. Itu BUG: rootWidth/rootHeight
+            // di scene JSON adalah resolusi device SAAT SCENE ITU DIBUAT/DISIMPAN (bisa portrait,
+            // bisa landscape, apapun waktu itu), BUKAN resolusi yang mau dipakai sekarang.
+            // width/height di atas SUDAH benar - selalu dikirim MainActivity via
+            // EXTRA_WIDTH/EXTRA_HEIGHT dari collectStreamParams(), yang SUDAH menghormati mode
+            // Custom resolution (lihat MainActivity.getTargetResolution()/collectStreamParams()).
+            // Menimpanya di sini bikin: user set Custom 1280x720 landscape, tapi kalau scene aktif
+            // dulu dibuat/disimpan waktu portrait, hasil live/record ikut jadi portrait lagi -
+            // persis laporan bug "custom landscape tapi hasil portrait". Konsisten dengan komentar
+            // di applyCompositeScene() yang juga sengaja TIDAK memakai rootWidth/rootHeight dari
+            // JSON scene untuk alasan yang sama.
 
             // Safety check: resolusi video wajib genap untuk encoder (H.264/H.265).
 
@@ -1112,16 +1108,61 @@ public class StreamService extends Service implements ConnectChecker {
     }
 
 
-    private Bitmap loadBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
-        try (InputStream is = getContentResolver().openInputStream(uri)) {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inPreferredConfig = Bitmap.Config.RGB_565; // Hemat RAM
-            Bitmap original = BitmapFactory.decodeStream(is, null, options);
-            if (original == null) return null;
-            return Bitmap.createScaledBitmap(original, reqWidth, reqHeight, true);
+    /** Hitung inSampleSize terbesar (power-of-2) yang masih menghasilkan bitmap >= target,
+     *  supaya BitmapFactory men-downsample SAAT decode (bukan decode penuh baru di-scale).
+     *  Ini menghindari alokasi bitmap raksasa sementara (misal foto 12MP = puluhan MB) yang
+     *  gampang bikin OutOfMemoryError di HP low-end dengan heap kecil (~192-256MB). */
+    private static int calculateInSampleSize(int rawWidth, int rawHeight, int reqWidth, int reqHeight) {
+        int inSampleSize = 1;
+        if (rawWidth <= 0 || rawHeight <= 0 || reqWidth <= 0 || reqHeight <= 0) return inSampleSize;
+        if (rawHeight > reqHeight || rawWidth > reqWidth) {
+            final int halfHeight = rawHeight / 2;
+            final int halfWidth = rawWidth / 2;
+            while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
+                inSampleSize *= 2;
+            }
+        }
+        return inSampleSize;
+    }
+
+    /** Decode gambar dari Uri langsung ke sekitar ukuran reqWidth x reqHeight tanpa pernah
+     *  membuat bitmap penuh-resolusi di memori. Pass 1 cuma baca dimensi (inJustDecodeBounds,
+     *  hampir tanpa alokasi memori), lalu pass 2 decode dengan inSampleSize yang sudah dihitung -
+     *  hasilnya bitmap sudah kecil dari GPU/CPU decoder-nya sendiri, jadi createScaledBitmap()
+     *  di akhir cuma tinggal "merapikan" ke ukuran pas (perbedaannya kecil, bukan potong resolusi
+     *  besar-besaran lagi seperti sebelumnya). */
+    private Bitmap decodeSampledBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
+        try {
+            BitmapFactory.Options boundsOptions = new BitmapFactory.Options();
+            boundsOptions.inJustDecodeBounds = true;
+            try (InputStream boundsStream = getContentResolver().openInputStream(uri)) {
+                BitmapFactory.decodeStream(boundsStream, null, boundsOptions);
+            }
+            if (boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null;
+
+            BitmapFactory.Options decodeOptions = new BitmapFactory.Options();
+            decodeOptions.inPreferredConfig = Bitmap.Config.RGB_565; // Hemat RAM
+            decodeOptions.inSampleSize = calculateInSampleSize(
+                    boundsOptions.outWidth, boundsOptions.outHeight, reqWidth, reqHeight);
+
+            try (InputStream decodeStream = getContentResolver().openInputStream(uri)) {
+                return BitmapFactory.decodeStream(decodeStream, null, decodeOptions);
+            }
         } catch (Exception e) {
+            Log.w(TAG, "decodeSampledBitmapFromUri gagal: " + e.getMessage());
             return null;
         }
+    }
+
+    private Bitmap loadBitmapFromUri(Uri uri, int reqWidth, int reqHeight) {
+        Bitmap sampled = decodeSampledBitmapFromUri(uri, reqWidth, reqHeight);
+        if (sampled == null) return null;
+        if (sampled.getWidth() == reqWidth && sampled.getHeight() == reqHeight) return sampled;
+        // Sampled bitmap sudah dekat ukuran target (paling beda < 2x), jadi scale terakhir ini
+        // murah - tidak lagi men-scale dari bitmap full-resolution seperti sebelumnya.
+        Bitmap scaled = Bitmap.createScaledBitmap(sampled, reqWidth, reqHeight, true);
+        if (scaled != sampled) sampled.recycle();
+        return scaled;
     }
 
     /** Load bitmap TANPA maksa stretch ke resolusi live - aspect rasio aslinya dipertahankan,
@@ -1136,19 +1177,17 @@ public class StreamService extends Service implements ConnectChecker {
             return renderEffectToBitmap(uri.getSchemeSpecificPart());
         }
         int maxDim = Math.max(savedWidth, savedHeight);
-        try (InputStream is = getContentResolver().openInputStream(uri)) {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inPreferredConfig = Bitmap.Config.RGB_565; // Hemat RAM
-            Bitmap original = BitmapFactory.decodeStream(is, null, options);
-            if (original == null) return null;
-            float scale = Math.min(1f, (float) maxDim / Math.max(original.getWidth(), original.getHeight()));
-            if (scale >= 1f) return original;
-            return Bitmap.createScaledBitmap(original,
-                    Math.round(original.getWidth() * scale),
-                    Math.round(original.getHeight() * scale), true);
-        } catch (Exception e) {
-            return null;
-        }
+        // reqWidth/reqHeight dipakai cuma buat menghitung inSampleSize decode (bukan target akhir
+        // yang di-stretch paksa) - aspect ratio asli tetap dijaga di bawah.
+        Bitmap sampled = decodeSampledBitmapFromUri(uri, maxDim, maxDim);
+        if (sampled == null) return null;
+        float scale = Math.min(1f, (float) maxDim / Math.max(sampled.getWidth(), sampled.getHeight()));
+        if (scale >= 1f) return sampled;
+        Bitmap scaled = Bitmap.createScaledBitmap(sampled,
+                Math.round(sampled.getWidth() * scale),
+                Math.round(sampled.getHeight() * scale), true);
+        if (scaled != sampled) sampled.recycle();
+        return scaled;
     }
 
     private Bitmap renderTextToBitmap(String rawText) {
@@ -1437,7 +1476,7 @@ public class StreamService extends Service implements ConnectChecker {
                     if ("KANAE_WEB".equals(lo.optString("type"))) {
                         String uri = lo.getString("uri");
                         String id = uri.startsWith("kanae:web:") ? uri.substring("kanae:web:".length()) : uri;
-                        
+
                         // Cari URL overlay
                         String url = null;
                         List<ame.project.nlsdk.KanaeWebOverlay> overlays = ame.project.nlsdk.KanaeOverlayBridge.INSTANCE.getOverlays();
@@ -1447,7 +1486,7 @@ public class StreamService extends Service implements ConnectChecker {
                                 break;
                             }
                         }
-                        
+
                         if (url != null) {
                             int lw = Math.max(1, (int)(lo.getDouble("w") * savedWidth));
                             int lh = Math.max(1, (int)(lo.getDouble("h") * savedHeight));
@@ -1480,7 +1519,7 @@ public class StreamService extends Service implements ConnectChecker {
         String testRecordEncoderLabel = activeTestRecordEncoderLabel;
         int testRecordWidth = activeTestRecordWidth;
         int testRecordHeight = activeTestRecordHeight;
-        
+
         isTestRecording = false;
         activeTestRecordPath = null;
 
